@@ -1,0 +1,9 @@
+# Normalize line endings: LF in the repo and on checkout. Without this every
+# write on Windows emits "LF will be replaced by CRLF" and diffs show
+# whole-file changes.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary

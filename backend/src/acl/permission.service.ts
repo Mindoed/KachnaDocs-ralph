@@ -59,24 +59,43 @@ export class PermissionService {
   }
 
   /**
-   * SQL fragment + params restricting a query to rows the actor may access.
-   * Usage: `SELECT d.* FROM documents d ${sql}` with `params` appended.
-   * This is how every later read path (search, websocket, AI retrieval) keeps
-   * ACL in the database instead of in TypeScript.
+   * SQL fragment restricting a query to rows the actor may access.
+   *
+   *   // query already passes one parameter of its own before the filter
+   *   const f = permissionService.documentsFilter(me.id, 'READ', { offset: 1 });
+   *   query(`SELECT d.* FROM documents d ${f.sql}`, [stateArg, ...f.params]);
+   *
+   * Postgres numbers parameters positionally, so a caller with its own
+   * parameters must say how many precede ours; otherwise $1 would bind to the
+   * caller's value and the ACL would silently filter on the wrong thing.
+   * `offset` = number of parameters placed before ours; `f.params` is appended
+   * after the caller's own values.
    */
-  documentsFilter(actorId: string, required: Permission, column = 'd.id'): { sql: string; params: unknown[] } {
+  documentsFilter(
+    actorId: string,
+    required: Permission,
+    options: { column?: string; offset?: number } = {},
+  ): { sql: string; params: unknown[] } {
+    const column = options.column ?? 'd.id';
+    const base = options.offset ?? 0;
     return {
       sql: `WHERE ${column} IN (
-              SELECT document_id FROM accessible_documents($1, $2::permission_kind)
+              SELECT document_id FROM accessible_documents($${base + 1}, $${base + 2}::permission_kind)
             )`,
       params: [actorId, required],
     };
   }
 
-  groupsFilter(actorId: string, required: Permission, column = 'g.id'): { sql: string; params: unknown[] } {
+  groupsFilter(
+    actorId: string,
+    required: Permission,
+    options: { column?: string; offset?: number } = {},
+  ): { sql: string; params: unknown[] } {
+    const column = options.column ?? 'g.id';
+    const base = options.offset ?? 0;
     return {
       sql: `WHERE ${column} IN (
-              SELECT group_id FROM accessible_groups($1, $2::permission_kind)
+              SELECT group_id FROM accessible_groups($${base + 1}, $${base + 2}::permission_kind)
             )`,
       params: [actorId, required],
     };
@@ -103,9 +122,14 @@ export class PermissionService {
     }>(
       `SELECT DISTINCT ON (gg.group_id, gg.permission)
                 gg.group_id AS target_id, g.name AS target_name, gg.permission, gg.source
-         FROM group_grants_for($1, 'READ') gg
+         FROM group_grants_for($1) gg
          JOIN groups g ON g.id = gg.group_id
-        ORDER BY gg.group_id, gg.permission, permission_rank(gg.permission) DESC`,
+        -- a direct grant is the better label to show than an inherited one of
+        -- the same rank, so order by rank first, then by directness
+        WHERE gg.permission <> 'NONE'
+        ORDER BY gg.group_id, gg.permission,
+                 permission_rank(gg.permission) DESC,
+                 ((gg.source->>'kind') IN ('direct', 'role')) DESC`,
       [actorId],
     );
     const docs = await query<{
@@ -122,8 +146,20 @@ export class PermissionService {
       [actorId],
     );
     return [
-      ...groups.map((r) => ({ ...r, targetKind: 'group' as const })),
-      ...docs.map((r) => ({ ...r, targetKind: 'document' as const })),
+      ...groups.map((r) => ({
+        targetKind: 'group' as const,
+        targetId: r.target_id,
+        targetName: r.target_name,
+        permission: r.permission,
+        source: r.source,
+      })),
+      ...docs.map((r) => ({
+        targetKind: 'document' as const,
+        targetId: r.target_id,
+        targetName: r.target_name,
+        permission: r.permission,
+        source: r.source,
+      })),
     ].sort(
       (a, b) =>
         a.targetKind.localeCompare(b.targetKind) ||

@@ -33,3 +33,39 @@ turned out to hurt. Design questions that SPEC.md does not answer belong here to
 - NestJS app wiring, controllers, seed, jest+supertest ACL suite, frontend shell, Playwright wiring.
 - Phase 1 will not finish inside 10 iterations. Remaining: e2e ACL tests, `docs/discord-oauth.md`,
   permissions admin view.
+
+## it.5-7 — backend boots; two real defects found by running it
+
+Seed now self-verifies (11 ACL expectations asserted in `verifyFixture()`); it
+exists because a mis-numbered `$n` placeholder silently built a nonsense
+permission graph — cheaper to assert than to eyeball SQL.
+
+Bugs found only by booting the API and curling it, neither visible to tsc:
+
+1. `user_discord_roles` had **no primary key** — node-pg-migrate's
+   `primaryKey: { columns: [...] }` table option emitted no constraint, so
+   repeated role syncs duplicated membership rows and `/auth/me` listed the same
+   Discord role twice. Fixed in migration 1740000003000 (dedupe + real PK).
+   **Do not trust that option; check constraints after migrating.**
+2. `effectiveForUser` called `group_grants_for($1, 'READ')` — two args to a
+   one-arg SQL function, added when the permission floor moved into each caller.
+   500 via `/permissions/effective`. The SQL layer was fine; the call site was
+   stale. Also made the source label prefer a direct grant over an inherited one
+   of equal rank.
+
+Verified working: dev login, `/auth/me`, `/permissions/effective` (Payroll
+reported as `role-inherited` via HR; `salaries` correctly absent for Ana, so the
+NONE override holds through the HTTP layer), anonymous request -> 401.
+
+## Phase 1 status — NOT complete
+
+Done: scaffold, compose+pgvector, SQL ACL (8 functions), identity providers,
+PermissionService, guard, permissions controller, seed + self-verification, API
+boots. Backend typechecks clean.
+
+Outstanding, all of it required before `AUTH DONE`: jest+supertest ACL suite,
+`docs/discord-oauth.md`, frontend shell + permissions view, Playwright wiring,
+eslint/prettier configs (root `lint` script currently has no config file),
+Swagger. `npm run verify` fails.
+
+Note: `.env` was created from `.env.example` for manual testing; gitignored.
