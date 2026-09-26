@@ -1,0 +1,29 @@
+{
+  "name": "kachnadocs",
+  "private": true,
+  "version": "0.0.0",
+  "workspaces": [
+    "shared",
+    "backend",
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "db:up": "docker compose up -d db",
+    "db:wait": "node scripts/wait-db.mjs",
+    "migrate": "npm run -w backend migrate",
+    "seed": "npm run -w backend seed",
+    "lint": "eslint . --ext .ts,.vue --max-warnings 0 && prettier --check \"**/*.{ts,vue,json,md}\"",
+    "typecheck": "npm run -w shared typecheck && npm run -w backend typecheck && npm run -w frontend typecheck",
+    "test": "npm run -w backend test",
+    "test:e2e": "npm run -w backend test:e2e && playwright test",
+    "verify": "npm run db:up && npm run db:wait && npm run lint && npm run typecheck && npm run test && npm run test:e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.47.0",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.3"
+  }
+}
