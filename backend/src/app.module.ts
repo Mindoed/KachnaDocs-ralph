@@ -8,10 +8,14 @@ import { PermissionService } from './acl/permission.service';
 import { RequirePermissionGuard } from './acl/require-permission.guard';
 import { AuthContextMiddleware } from './auth/auth-context.middleware';
 import { PermissionsController } from './acl/permissions.controller';
+import { DocumentsController } from './documents/documents.controller';
+import { HealthController } from './health.controller';
 
 @Module({
   imports: [JwtModule.register(buildJwtOptions())],
-  controllers: [AuthController, PermissionsController],
+  // HealthController is unauthenticated by design: a probe that needs a token
+  // cannot answer "why is the API down".
+  controllers: [HealthController, AuthController, PermissionsController, DocumentsController],
   providers: [
     AuthService,
     UsersService,
