@@ -1,23 +1,24 @@
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import { query } from '../src/db';
 import { FIXTURES } from '../src/seed';
-import { doc, resetDatabase, startServer, stopServer } from './helpers';
+import { doc, group, resetDatabase, startServer, stopServer, user } from './helpers';
 
 /**
- * The phase-2 schema carries three properties that the rest of the phase will
- * rely on and that nothing else would catch if they regressed:
+ * Database-level invariants the rest of phase 2 rests on, each of which was
+ * broken at some point during its own making:
  *
- *  1. published versions are immutable at the *database* level
+ *  1. published versions are immutable to a direct write, yet deletable when
+ *     their document is deleted (the trigger originally blocked both)
  *  2. a draft and a published version genuinely differ, so "readers see the
  *     published text" is a testable claim rather than a tautology
  *  3. a document may exist with no version history at all
+ *  4. groups cannot be made cyclic, because the ACL resolver would recurse
+ *     forever and every read path in the app would hang
  *
- * The assertions run over SQL directly because there are no CMS endpoints yet —
- * that is the next iteration. Asserting the schema now means a later controller
- * cannot quietly weaken it and stay green. The server is still booted, for two
- * reasons: startServer() migrates the test database, and it is what proves this
- * file's queries run against the same schema the API does rather than whatever
- * happened to be left in the container.
+ * These assert SQL directly rather than going through HTTP: a trigger is not
+ * reachable over the API once a controller stops trying to violate it, and
+ * phase 2's controllers arrived *after* these tests, which is the order that
+ * keeps a later controller from quietly weakening the schema.
  */
 beforeAll(async () => {
   await startServer();
@@ -107,5 +108,82 @@ describe('CMS schema', () => {
       'SELECT count(*)::int AS n FROM documents WHERE category_id IS NULL',
     );
     expect(rows[0]?.n).toBe(3);
+  });
+
+  it('lets a document take its versions with it', async () => {
+    // The asymmetry the trigger must get right: a direct version DELETE is
+    // refused (asserted above), while the ON DELETE CASCADE from documents must
+    // be allowed, or nothing that was ever published could be deleted.
+    const id = doc('salaries');
+    const before = await query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM document_versions WHERE document_id = $1',
+      [id],
+    );
+    expect(before[0]?.n).toBe(1);
+
+    await query('DELETE FROM documents WHERE id = $1', [id]);
+
+    const after = await query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM document_versions WHERE document_id = $1',
+      [id],
+    );
+    expect(after[0]?.n).toBe(0);
+  });
+});
+
+/**
+ * A group cycle is a denial of service rather than untidy data:
+ * group_grants_for recurses over parent_id with UNION ALL and no guard of its
+ * own, so once a cycle exists every accessible_* / can_access_* call recurses
+ * forever. Verified the hard way — the experiment needed a statement_timeout to
+ * return at all. Migration 1740000007000 rejects it at the write.
+ */
+describe('group cycle guard', () => {
+  it('rejects reparenting a group under its own descendant', async () => {
+    await expect(
+      query('UPDATE groups SET parent_id = $1 WHERE id = $2', [group('payroll'), group('hr')]),
+    ).rejects.toThrow(/cycle/);
+  });
+
+  it('rejects a group as its own parent', async () => {
+    await expect(query('UPDATE groups SET parent_id = $1 WHERE id = $1', [group('hr')])).rejects.toThrow(
+      /own parent/,
+    );
+  });
+
+  it('still allows a legitimate reparent', async () => {
+    const [created] = await query<{ id: string }>(
+      `INSERT INTO groups (parent_id, name) VALUES ($1, 'Presun pred cyklem') RETURNING id`,
+      [group('hr')],
+    );
+    expect(created).toBeDefined();
+
+    // Asserted by re-reading rather than by row count: an UPDATE without
+    // RETURNING yields no rows even when it succeeds, so toHaveLength(1) here
+    // would fail on a write that worked.
+    await query('UPDATE groups SET parent_id = $1 WHERE id = $2', [group('engineering'), created?.id]);
+    const moved = await query<{ parent_id: string }>('SELECT parent_id FROM groups WHERE id = $1', [
+      created?.id,
+    ]);
+    expect(moved[0]?.parent_id).toBe(group('engineering'));
+
+    // Clearing the parent is a move to top level, not a cycle.
+    await query('UPDATE groups SET parent_id = NULL WHERE id = $1', [created?.id]);
+    const cleared = await query<{ parent_id: string | null }>('SELECT parent_id FROM groups WHERE id = $1', [
+      created?.id,
+    ]);
+    expect(cleared[0]?.parent_id).toBeNull();
+
+    await query('DELETE FROM groups WHERE id = $1', [created?.id]);
+  });
+
+  it('leaves the ACL resolver responsive afterwards', async () => {
+    // The point of the trigger: this query is what hangs when a cycle exists.
+    const rows = await query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM accessible_groups($1, 'READ') AS ag(grp)`,
+      [user('ana')],
+    );
+    // HR and Payroll, reached through her HR role.
+    expect(rows[0]?.n).toBe(2);
   });
 });

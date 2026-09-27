@@ -97,6 +97,8 @@ async function call(method: string, path: string, token?: string, payload?: unkn
 export const http = {
   get: (path: string, token?: string) => call('GET', path, token),
   post: (path: string, payload?: unknown, token?: string) => call('POST', path, token, payload),
+  patch: (path: string, payload?: unknown, token?: string) => call('PATCH', path, token, payload),
+  put: (path: string, payload?: unknown, token?: string) => call('PUT', path, token, payload),
   del: (path: string, token?: string) => call('DELETE', path, token),
 };
 

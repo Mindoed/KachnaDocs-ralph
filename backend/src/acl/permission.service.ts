@@ -91,8 +91,13 @@ export class PermissionService {
     const column = options.column ?? 'g.id';
     const base = options.offset ?? 0;
     return {
+      // accessible_groups returns SETOF uuid, so its result column is named
+      // after the function, not "group_id" — `SELECT group_id FROM
+      // accessible_groups(...)` is a column-does-not-exist error, which is what
+      // this alias list prevents. accessible_documents is different (it returns
+      // TABLE, which does name its columns) so documentsFilter needs no alias.
       sql: `WHERE ${column} IN (
-              SELECT group_id FROM accessible_groups($${base + 1}, $${base + 2}::permission_kind)
+              SELECT grp FROM accessible_groups($${base + 1}, $${base + 2}::permission_kind) AS ag(grp)
             )`,
       params: [actorId, required],
     };
