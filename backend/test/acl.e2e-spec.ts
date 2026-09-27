@@ -55,6 +55,21 @@ describe('ACL enforcement over HTTP', () => {
       expect((res.body as { slug: string }).slug).toBe('hr-handbook');
     });
 
+    it('reports the owner as a Discord role (SPEC.md:95)', async () => {
+      // SPEC.md prefers role ownership so access survives individual departures.
+      // Ownership is metadata, not an access path — the ACL never reads it — so
+      // what this pins is that documents stay bound to a role rather than drifting
+      // to per-user owners as later phases add document writes.
+      const token = await loginAs('ana');
+      const owned = await http.get(`/documents/${doc('handbook')}`, token);
+      expect((owned.body as { ownerRole: { name: string } | null }).ownerRole?.name).toBe('HR');
+
+      const every = await http.get('/documents', token);
+      for (const d of every.body as { ownerRole: unknown }[]) {
+        expect(d.ownerRole).not.toBeNull();
+      }
+    });
+
     it('refuses a document the caller cannot read', async () => {
       const token = await loginAs('bona');
       const res = await http.get(`/documents/${doc('handbook')}`, token);

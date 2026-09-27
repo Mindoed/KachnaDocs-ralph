@@ -118,3 +118,28 @@ Scope line for the browser suite, so it does not sprawl: it owns real-browser co
 session survives reload, docking persists, grant round-trip, SPA fallback). ACL *decisions* stay in
 jest, which covers the same code far faster. The grant test revokes what it grants, which is what lets
 it share the seeded fixture instead of needing an isolated database.
+
+## it.1 (this loop) — phase 1 verification pass; SPEC.md:95 was unenforced
+
+Re-ran `npm run verify` from a clean tree rather than trusting the "COMPLETE" entry
+above. It passed (exit 0) as claimed, so the *gate* was honest. Auditing the §3
+bullets against the code anyway turned up one that the gate did not actually cover:
+
+- **SPEC.md:95 ("preferovat vázat vlastníky dokumentu jako discord roli") was data
+  without behavior.** `documents.owner_role_id` existed in the schema and the seed
+  populated it, but nothing read it — no query selected it, no DTO carried it, no
+  assertion mentioned it. A later phase adding document writes could have moved
+  ownership to per-user owners and the suite would have stayed green, which is the
+  shape of gap a green gate is most dangerous for.
+- Fix: `GET /documents` and `GET /documents/:id` now return `ownerRole`
+  (`LEFT JOIN discord_roles`), and `acl.e2e-spec.ts` asserts `hr-handbook` is
+  owned by the `HR` role and that *every* document the caller can see has a
+  non-null owner. 28 jest-over-HTTP tests now (was 27).
+- **Deliberate non-change: the ACL still does not read `owner_role_id`.** Ownership
+  is provenance, not an access path. Making owners implicitly get MANAGE would put
+  a second, un-`PermissionService` decision point into the system, violating
+  PLAN.md §3.1; SPEC.md:95 constrains *what owners are bound to*, not what owners
+  may do.
+- Also verified rather than assumed: `docs/discord-oauth.md` exists; the grant
+  editor really does offer `discord_role` subjects (SPEC.md:88), so the "users and
+  Discord roles" bullet is met on the write path, not just the schema.
