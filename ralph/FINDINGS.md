@@ -190,3 +190,38 @@ shape of bug the phase-1 ACL tests exist to make impossible.
   caller, and `/health` is still 200. 31 over-HTTP tests (was 30). Frontend
   verified unaffected: `auth.ts restore()` already treats any `/auth/me` failure
   as "not signed in".
+
+## it.1 — CMS schema: categories, drafts, immutable versions, headings
+
+Migration 1740000005000_cms. Verified in psql, not just by typecheck:
+3 version rows (one per Published doc), the immutability trigger rejecting
+`UPDATE document_versions`, the category linked to a document, all four docs
+carrying a draft body.
+
+- **Version immutability is a database trigger, not a convention.** PLAN.md 2.3
+  makes snapshots self-contained and permanent; a test asserting "an update
+  attempt on a version fails" is only durable if the *database* refuses, because
+  the test helpers can and do run raw SQL. BEFORE UPDATE and BEFORE DELETE
+  both raise `check_violation`.
+- **Categories are not an ACL target.** They hang off a group and are visible
+  exactly where that group is, so `accessible_groups`/`accessible_documents`
+  stay the only resolution paths. Adding a third target kind would mean a third
+  inheritance implementation to get right. Per-category grants -> DEFERRED.md.
+- Seed now writes drafts whose text **differs from the published version** for
+  handbook and salaries. That divergence is the fixture the "reader sees
+  published, not draft" test needs; without it the assertion would pass for the
+  wrong reason. `private-idea` stays version-less to prove the no-history case.
+- Phase-1 migration gotchas avoided on purpose: no `primaryKey: { columns } }`
+  table option (unique `createIndex` instead), `createType`-style types, no
+  backticks inside the `$$`-quoted trigger body.
+
+## Gate hazard: two concurrent `npm run verify` runs corrupt each other
+
+I started a second verify while the first was still in flight. Both migrate and
+both `TRUNCATE ... RESTART IDENTITY CASCADE` the same `kachnadocs_test`, and the
+second run's `migrate up --env=test` failed under the first — **30 of 31 tests
+red, none of them for a real reason**. The green run that had just finished was
+the correct answer.
+
+One verify at a time, and read the exit code from the run you launched rather
+than starting another when a log looks stalled.

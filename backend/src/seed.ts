@@ -29,6 +29,11 @@ export const FIXTURES = {
     payroll: 'bbbbbbb2-0000-0000-0000-000000000000',
     engineering: 'bbbbbbb3-0000-0000-0000-000000000000',
   },
+  categories: {
+    // Under Payroll, to prove the tree reaches three levels: group > category >
+    // document. Documents without a category (all the others) stay valid too.
+    mzdove: 'ddddddd1-0000-0000-0000-000000000000',
+  },
   documents: {
     handbook: 'ccccccc1-0000-0000-0000-000000000000',
     salaries: 'ccccccc2-0000-0000-0000-000000000000',
@@ -37,6 +42,21 @@ export const FIXTURES = {
   },
 } as const;
 
+/** Minimal ProseMirror doc, used for both draft and first published snapshot. */
+function body(paragraphText: string): unknown {
+  return {
+    type: 'doc',
+    content: [
+      { type: 'heading', attrs: { anchor: 'sec-1', level: 1 }, content: [{ type: 'text', text: 'Obsah' }] },
+      { type: 'paragraph', content: [{ type: 'text', text: paragraphText }] },
+    ],
+  };
+}
+
+function markdown(paragraphText: string): string {
+  return `# Obsah {data-anchor="sec-1"}\n\n${paragraphText}\n`;
+}
+
 export async function seed(): Promise<void> {
   const f = FIXTURES;
 
@@ -44,7 +64,8 @@ export async function seed(): Promise<void> {
   // earlier version of this file would silently change what the ACL tests
   // prove. Seed data only — never call this against anything you care about.
   await query(
-    `TRUNCATE permissions, documents, groups, user_discord_roles, discord_roles, users
+    `TRUNCATE permissions, documents, groups, user_discord_roles, discord_roles, users,
+       categories, document_versions, headings
        RESTART IDENTITY CASCADE`,
   );
 
@@ -96,6 +117,13 @@ export async function seed(): Promise<void> {
     [f.groups.hr, f.groups.payroll, f.groups.engineering],
   );
 
+  // Before documents: documents.category_id references it.
+  await query(
+    `INSERT INTO categories (id, group_id, name, position) VALUES
+       ($1, $2, 'Mzdové předpisy', 0)`,
+    [f.categories.mzdove, f.groups.payroll],
+  );
+
   await query(
     `INSERT INTO documents (id, group_id, slug, title, state, owner_role_id) VALUES
        ($1, $5, 'hr-handbook',    'Příručka HR',        'Published', $7),
@@ -114,6 +142,83 @@ export async function seed(): Promise<void> {
       f.roles.eng,
     ],
   );
+
+  // Drafts and published history. Every Published document gets a version 1 so
+  // the phase-2 tests have real history to diff and restore against rather than
+  // publishing first in every test body, and every document gets a draft whose
+  // text deliberately differs from its published version — that difference is
+  // what "a reader sees the published version, not the draft" is tested against.
+  const docs: Array<{
+    id: string;
+    title: string;
+    category: string | null;
+    position: number;
+    published: string | null;
+    draft: string;
+    author: string | null;
+  }> = [
+    {
+      id: f.documents.handbook,
+      title: 'Příručka HR',
+      category: null,
+      position: 0,
+      published: 'Základní pravidla/personálu.',
+      draft: 'Základní pravidla/personálu. Koncept úprav.',
+      author: f.users.ana,
+    },
+    {
+      id: f.documents.salaries,
+      title: 'Ohodnocování',
+      category: f.categories.mzdove,
+      position: 0,
+      published: 'Tabulky ohodnocení.',
+      draft: 'Tabulky ohodnocení — připravovaná revize.',
+      author: f.users.ana,
+    },
+    {
+      id: f.documents.runbook,
+      title: 'Nasazovací runbook',
+      category: null,
+      position: 0,
+      published: 'Kroky nasazení.',
+      draft: 'Kroky nasazení.',
+      author: f.users.bona,
+    },
+    {
+      // Draft-only: never published, so it has no version rows at all.
+      id: f.documents.privateIdea,
+      title: 'Tajný nápad',
+      category: null,
+      position: 1,
+      published: null,
+      draft: 'Ještě nedokončeno.',
+      author: null,
+    },
+  ];
+
+  for (const d of docs) {
+    await query(
+      `UPDATE documents
+          SET category_id = $2, position = $3, draft_body = $4, draft_markdown = $5,
+              draft_updated_at = now()
+        WHERE id = $1`,
+      [d.id, d.category, d.position, JSON.stringify(body(d.draft)), markdown(d.draft)],
+    );
+
+    if (!d.published) continue;
+    const [version] = await query<{ id: string }>(
+      `INSERT INTO document_versions (document_id, number, title, body, markdown, author_id, comment)
+       VALUES ($1, 1, $2, $3, $4, $5, 'První publikace')
+       RETURNING id`,
+      [d.id, d.title, JSON.stringify(body(d.published)), markdown(d.published), d.author],
+    );
+    if (!version) throw new Error(`seed: no version created for ${d.id}`);
+    await query('INSERT INTO headings (version_id, anchor, level, text, ord) VALUES ($1, $2, 1, $3, 0)', [
+      version.id,
+      'sec-1',
+      'Obsah',
+    ]);
+  }
 
   // Grants. One statement each: the multi-row form needs N x 5 placeholders
   // and is far too easy to mis-number, which is exactly what broke here.
