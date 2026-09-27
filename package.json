@@ -14,16 +14,28 @@
     "db:up": "docker compose up -d db",
     "db:wait": "node scripts/wait-db.mjs",
     "migrate": "npm run -w backend migrate",
+    "migrate:test": "npm run -w backend migrate:test",
     "seed": "npm run -w backend seed",
-    "lint": "eslint . --ext .ts,.vue --max-warnings 0 && prettier --check \"**/*.{ts,vue,json,md}\"",
-    "typecheck": "npm run -w shared typecheck && npm run -w backend typecheck && npm run -w frontend typecheck",
+    "seed:test": "npm run -w backend seed:test",
+    "lint": "eslint . --ext .ts,.vue --max-warnings 0 && prettier --check \"**/*.{ts,vue,json}\"",
+    "build": "npm run build -w frontend",
+    "dev:api": "npm run -w backend start",
+    "dev:web": "npm run -w frontend dev",
+    "dev": "npm run db:up && npm run db:wait && npm run migrate && npm run seed && concurrently -k -P -n api,web -c blue,magenta \"npm run dev:api\" \"npm run dev:web\"",
+    "typecheck": "npm run -w shared typecheck && npm run -w backend typecheck && npm run -w frontend typecheck && tsc -p e2e",
     "test": "npm run -w backend test",
     "test:e2e": "npm run -w backend test:e2e && playwright test",
-    "verify": "npm run db:up && npm run db:wait && npm run lint && npm run typecheck && npm run test && npm run test:e2e"
+    "verify": "npm run db:up && npm run db:wait && npm run migrate && npm run migrate:test && npm run seed && npm run -w backend seed:test && npm run lint && npm run typecheck && npm run build && npm run test && npm run test:e2e"
   },
   "devDependencies": {
     "@playwright/test": "^1.47.0",
+    "@typescript-eslint/eslint-plugin": "^8.70.1",
+    "@typescript-eslint/parser": "^8.70.1",
+    "concurrently": "^10.0.5",
     "eslint": "^8.57.0",
-    "prettier": "^3.3.3"
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-vue": "^9.33.0",
+    "prettier": "^3.3.3",
+    "vue-eslint-parser": "^9.4.3"
   }
 }

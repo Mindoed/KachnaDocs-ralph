@@ -40,8 +40,36 @@ head -10 .claude/ralph-loop.local.md   # stav loopu (iterace, limit, promise)
 
 ```bash
 cp .env.example .env
-docker compose up -d db
 npm install
-npm run migrate && npm run seed
-npm run verify      # lint + typecheck + jest + playwright
+npm run dev         # db + migrace + seed, pak API na :3000 a Vite na :5173
 ```
+
+Bez `concurrently` (dva terminály):
+
+```bash
+npm run dev:api     # API + Swagger na http://localhost:3000/api/docs
+npm run dev:web     # Vite; /api proxyuje na :3000
+```
+
+`npm run dev` volá `migrate` a `seed` na dev databázi pokaždé — `seed` je idempotentní a rebuilduje
+fixture celý, takže vývojář nikdy nezůstane na schématu, ke kterému se migrovalo „kdysi".
+
+Po builté frontendu (`npm run build`) API samo obslouží i SPA na stejném originu — to je cesta, kterou
+ používá Playwright, a hodí se i pro jakékoli single-process nasazení.
+
+## Gate
+
+```bash
+npm run verify
+```
+
+`db:up` → `db:wait` → `migrate` + `migrate:test` → `seed` + `seed:test` → `lint` → `typecheck` →
+`build` → `test` (jest unit) → `test:e2e` (jest přes reálné HTTP + Playwright). Podrobnosti a pravidla
+v [ralph/PLAN.md](ralph/PLAN.md) §4. Rychlejší cílené kroky:
+
+```bash
+npm run test          # jest unit (bez e2e)
+npm run test:e2e      # jest e2e + playwright
+npx playwright test   # jen prohlížeč (sám nastartuje API i DB)
+```
+
