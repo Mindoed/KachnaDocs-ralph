@@ -11,6 +11,7 @@ import { PermissionsController } from './acl/permissions.controller';
 import { DocumentsController } from './cms/documents.controller';
 import { GroupsController } from './cms/groups.controller';
 import { CategoriesController } from './cms/categories.controller';
+import { VersionsController } from './cms/versions.controller';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -24,6 +25,7 @@ import { HealthController } from './health.controller';
     DocumentsController,
     GroupsController,
     CategoriesController,
+    VersionsController,
   ],
   providers: [
     AuthService,
