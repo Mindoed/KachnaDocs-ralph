@@ -32,7 +32,8 @@ const subjectQuery = ref('');
 const targetQuery = ref('');
 const subjectId = ref('');
 const targetId = ref('');
-const permission = ref<Permission>('READ');
+/** GrantKind, not Permission: the form can also store the NONE deny override. */
+const permission = ref<GrantKind>('READ');
 
 const canManage = ref(false);
 const busy = ref(false);
@@ -40,12 +41,18 @@ const error = ref<string | null>(null);
 const notice = ref<string | null>(null);
 
 /**
- * `NONE` is storable but deliberately not offered here: it is how a document
- * overrides an inherited grant to deny (SPEC.md:82), and picking it from a list
- * labelled READ/WRITE/MANAGE would look like "lowest permission" rather than
- * "explicit deny". It arrives with the per-document override UI in phase 2.
+ * The three rungs, plus `NONE` — SPEC.md:82's explicit deny, which overrides an
+ * inherited grant at document level.
+ *
+ * `NONE` is not a fourth rung: it means "nothing, and this beats inheritance".
+ * So it is separated from the ladder by a non-selectable heading rather than
+ * sitting in the same list where it would read as "less than READ". The
+ * explanation below the select carries the rest of the meaning, because the one
+ * thing a manager needs to understand before clicking it is that it wins over
+ * the group inheritance they may not even be able to see from here.
  */
-const PERMISSIONS: Permission[] = ['READ', 'WRITE', 'MANAGE'];
+const LADDER: Permission[] = ['READ', 'WRITE', 'MANAGE'];
+const DENY: GrantKind = 'NONE';
 
 const KIND_LABEL: Record<Subject['kind'] | Target['kind'], string> = {
   user: 'uživatel',
@@ -171,9 +178,15 @@ defineExpose({ load });
       <label>
         <span class="muted">Oprávnění</span>
         <select v-model="permission">
-          <option v-for="p in PERMISSIONS" :key="p" :value="p">{{ p }}</option>
+          <option v-for="p in LADDER" :key="p" :value="p">{{ p }}</option>
+          <option disabled>———</option>
+          <option :value="DENY">NONE — explicitní zamítnutí</option>
         </select>
       </label>
+      <p v-if="permission === DENY" class="deny-note muted">
+        NONE cíl uzavře i tomu, kdo má přístup zděděný přes skupinu. Slouží k výjimce „nesmí to vidět“ u
+        jednotlivého dokumentu.
+      </p>
 
       <button class="primary" :disabled="busy || !subjectId || !targetId" @click="add">Přidat</button>
     </div>
@@ -282,6 +295,17 @@ label {
 
 .badge[data-permission='WRITE'] {
   color: var(--accent);
+}
+
+/* NONE is a denial, so it wears the danger colour rather than a fourth rung's. */
+.badge[data-permission='NONE'] {
+  color: var(--danger);
+}
+
+.deny-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.75rem;
 }
 
 .pair {

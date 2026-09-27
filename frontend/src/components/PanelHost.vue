@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, type Component } from 'vue';
 import type { ViewDescriptor } from '../stores/layout';
+import CmsTreePanel from './CmsTreePanel.vue';
 import PermissionsPanel from './PermissionsPanel.vue';
+import VersionHistoryPanel from './VersionHistoryPanel.vue';
 
 const props = defineProps<{ view: ViewDescriptor }>();
 
@@ -10,6 +12,8 @@ const props = defineProps<{ view: ViewDescriptor }>();
  * Code-splitting per view can wait until there is a heavy one (the editor).
  */
 const PANELS: Record<string, Component> = {
+  cms: CmsTreePanel,
+  versions: VersionHistoryPanel,
   permissions: PermissionsPanel,
 };
 

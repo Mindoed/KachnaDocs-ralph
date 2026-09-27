@@ -48,3 +48,18 @@ Format: `phase — SPEC.md bullet — reason`
   Phase 2 stores `draft_body` (ProseMirror JSON) + `draft_markdown` instead, because the collaborative
   server arrives in phase 3. Publish reads from the same columns phase 3 will populate, so the snapshot
   path does not change when Yjs lands — only the writer does.
+- **2 — SPEC.md §1 "Očekávané chování": "Publikování … informuje ostatní klienty o změně"** — publishing
+  creates the version row (asserted) but pushes nothing to other clients, because there is no transport to
+  push over: the y-websocket server is phase 3, and PLAN.md §4 puts "publish→reader refresh" inside
+  Playwright's realtime scope for exactly that reason. Phase 2 ships the pull path — the history panel
+  refetches after a publish, and a reader's next request sees the new head. When the websocket lands, the
+  publish handler gains one broadcast; neither the snapshot nor the ACL path changes. This is the one
+  SPEC.md §1 bullet phase 2 does not satisfy, and the one it cannot satisfy without phase 3's infrastructure.
+- **2 — the CMS tree renders Markdown, not styled ProseMirror output** — `VersionHistoryPanel` shows a
+  snapshot's `markdown` in a `<pre>` plus its heading outline. Rendering the ProseMirror JSON is the
+  editor's job (phase 3 owns Tiptap); a second, cheaper formatter here would mean two definitions of what a
+  document looks like, free to disagree.
+- **2 — group and category CRUD has no UI** — SPEC.md §1 asks the CMS view to create, rename, move, archive
+  and delete _documents_, which the tree does. Groups and categories are managed through the API
+  (`/groups`, `/categories`, covered by `cms-crud.e2e-spec.ts`) and the seed fixture. A tree read-only above
+  the document level is a real limitation of this phase's UI, recorded rather than left implied.

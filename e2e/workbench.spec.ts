@@ -147,6 +147,117 @@ test('the grant editor is absent for someone who manages nothing', async ({ page
   await expect(page.locator('.permissions .empty')).toContainText('nemá žádná oprávnění');
 });
 
+test('the CMS tree lists the caller’s documents and selecting one shows its history', async ({ page }) => {
+  // One browser context on purpose. Two-context sync is phase 3's job (PLAN §4
+  // scopes Playwright to realtime behavior); what this phase needs proven here
+  // is narrower and still cannot be seen any other way: that the built bundle
+  // renders the four-level hierarchy and that clicking a tree row drives a
+  // second, independently-docked panel off the same store.
+  await login(page, 'bona');
+
+  const tree = page.locator('.tree[role="tree"]');
+  await expect(tree).toBeVisible();
+  // Bona sees the Engineering group and both of her documents, and nothing from
+  // HR — the tree is built from API results that are already ACL-filtered.
+  await expect(tree.locator('.row.group')).toHaveCount(1);
+  await expect(tree.locator('.row.document')).toHaveCount(2);
+  await expect(tree.locator('.row.document', { hasText: 'Tajný nápad' })).toBeVisible();
+  await expect(tree.locator('.row.document', { hasText: 'Příručka HR' })).toHaveCount(0);
+
+  // State badge per SPEC.md §1 "Zobrazovat stav dokumentu". Czech label, not the
+  // stored enum value: the badge renders DOCUMENT_STATE_LABEL from shared/, and
+  // asserting the rendered word is what catches a panel that reverts to showing
+  // "Published" in a Czech UI.
+  const runbook = tree.locator('.row.document', { hasText: 'Nasazovací runbook' });
+  await expect(runbook.locator('.badge')).toHaveText('Publikováno');
+
+  await runbook.click();
+  const history = page.locator('.dock.right .history');
+  await expect(history).toBeVisible();
+  // The seed gives every Published document exactly one version.
+  await expect(history.locator('.versions li')).toHaveCount(1);
+  await expect(history).toContainText('První publikace');
+  // Bona MANAGEs it, so publishing is offered to her.
+  await expect(history.getByRole('button', { name: /Publikovat koncept/ })).toBeVisible();
+
+  await history.locator('.versions li .num').click();
+  await expect(history.locator('.snapshot')).toContainText('Kroky nasazení.');
+
+  // The runbook's seed draft is word-for-word its published text, so the honest
+  // expectation is a diff with lines but no additions or deletions — an empty
+  // diff list would mean the viewer had nothing to render at all.
+  await history.getByRole('button', { name: /Srovnat s aktuální/ }).click();
+  await expect(history.locator('.diff li')).toHaveCount(3);
+  await expect(history.locator('.diff li.add, .diff li.remove')).toHaveCount(0);
+  await expect(history.locator('.summary')).toContainText('+0 / −0');
+
+  // The move affordance (SPEC.md §1 "přesouvat"). Opened and cancelled rather
+  // than committed: Bona holds WRITE on exactly one group, so there is no second
+  // group to move into, and committing here would mutate the fixture the tests
+  // above and below assume. Where a move actually lands is asserted over HTTP in
+  // backend/test/cms-crud.e2e-spec.ts, which can create a destination.
+  await runbook.getByTitle('Přesunout').click();
+  const move = tree.locator('.move');
+  await expect(move).toBeVisible();
+  // Only groups the caller may write are offered, and one is preselected so the
+  // form starts from where the document actually is. Bona writes one group, so
+  // the list has one entry — the same writableGroups filter that hides the
+  // "new document" form from Carl.
+  await expect(move.locator('select').first().locator('option')).toHaveCount(1);
+  await expect(move.locator('select').first()).not.toHaveValue('');
+  await move.getByRole('button', { name: 'Zrušit' }).click();
+  await expect(move).toHaveCount(0);
+});
+
+test('a reader is offered no write affordances in the tree', async ({ page }) => {
+  // Carl READs the runbook and nothing else. The point is not that he cannot
+  // click — the backend would refuse him anyway (PLAN §3.5) — but that the
+  // affordances are absent, which is only observable in a browser.
+  await login(page, 'carl');
+  const tree = page.locator('.tree[role="tree"]');
+  await expect(tree.locator('.row.document')).toHaveCount(1);
+  await expect(tree.locator('.row .actions')).toHaveCount(0);
+  // No writable group, so no "new document" form either.
+  await expect(tree.locator('.create')).toHaveCount(0);
+
+  await tree.locator('.row.document').click();
+  await expect(page.locator('.dock.right .history').getByRole('button', { name: /Publikovat/ })).toHaveCount(
+    0,
+  );
+});
+
+test('NONE is reachable in the grant editor and renders as a denial', async ({ page }) => {
+  // Phase 1 deferred this because the deny override (SPEC.md:82) needed to appear
+  // next to the grant it overrides. What a browser can check is the part of that
+  // which is genuinely UI: the option is selectable, and once stored it reads as a
+  // denial rather than as a fourth rung below READ. That NONE actually denies is
+  // asserted over HTTP in acl.e2e-spec.ts, where the SQL resolver decides.
+  await login(page, 'bona');
+
+  const editor = page.locator('.editor');
+  await editor.locator('input[placeholder^="jméno"]').fill('Carl');
+  await editor.locator('select').first().selectOption({ label: 'Carl Dvořák (uživatel)' });
+  await editor.locator('input[placeholder^="název"]').fill('Tajný');
+  await editor.locator('select').nth(1).selectOption({ label: 'Tajný nápad (dokument)' });
+
+  const permission = editor.locator('select').nth(2);
+  await permission.selectOption('NONE');
+  // The explanation appears only for NONE, which is the signal that this is not
+  // one more permission level.
+  await expect(editor.locator('.deny-note')).toBeVisible();
+
+  await editor.getByRole('button', { name: 'Přidat' }).click();
+  const noneRow = editor
+    .locator('.explicit li')
+    .filter({ hasText: 'Tajný nápad' })
+    .filter({ hasText: 'NONE' });
+  await expect(noneRow).toHaveCount(1);
+  await expect(noneRow.locator('.badge')).toHaveCount(1);
+
+  await noneRow.getByTitle('Zrušit grant').click();
+  await expect(noneRow).toHaveCount(0);
+});
+
 test('/api/docs serves the OpenAPI document', async ({ request }) => {
   const res = await request.get('/api/docs-json');
   expect(res.ok()).toBeTruthy();

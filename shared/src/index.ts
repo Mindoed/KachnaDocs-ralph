@@ -59,6 +59,20 @@ export interface EffectiveGrant extends EffectivePermission {
 export type DocumentState = 'Draft' | 'Published' | 'Archived';
 
 /**
+ * Display labels for the state badge (SPEC.md §1 "Zobrazovat stav dokumentu").
+ *
+ * In `shared/` because two panels render the same badge — the tree row and the
+ * history header — and a label map duplicated across them is how one of them ends
+ * up saying "Publikováno" while the other says "Published". The enum itself stays
+ * English: it is what the API and the database store.
+ */
+export const DOCUMENT_STATE_LABEL: Record<DocumentState, string> = {
+  Draft: 'Koncept',
+  Published: 'Publikováno',
+  Archived: 'Archivováno',
+};
+
+/**
  * CMS response shapes (phase 2). They live here rather than in `frontend/src`
  * because PLAN.md §1 makes `shared/` the thing that stops the two sides drifting:
  * a controller that renames a field stops typechecking the panel that reads it,

@@ -247,3 +247,114 @@ than starting another when a log looks stalled.
   inheritance path would break the phase-1 single-decision-point invariant), and
   `y_state` waits for phase 3 — publish reads the same columns phase 3 will fill.
 - Gate: 5 unit + 39 over-HTTP + 9 Playwright, exit 0.
+
+## it.2 — CMS CRUD: three defects the first real caller exposed
+
+Controllers for documents, groups and categories (`src/cms/`), replacing the
+phase-1 prototype. Every read puts the ACL predicate in the `WHERE` clause rather
+than asking permission and then fetching, so "no READ" and "no such row" stay one 404. Then three things broke, all of them real:
+
+- **`groupsFilter` had never run.** Phase 1 wrote it selecting `group_id` from
+  `accessible_groups()`, which returns `SETOF uuid` and therefore names its single
+  column after the function. `GET /groups` was the first caller and answered 500
+  `column "group_id" does not exist`. An ACL helper that is dead code is not an
+  ACL helper — it is a bug with a type signature. Fixed with an alias list
+  (`AS ag(grp)`).
+- **The immutability trigger blocked deleting documents.** `BEFORE DELETE` on
+  `document_versions` also fires for the `ON DELETE CASCADE` from `documents`, so
+  any published document was undeletable. Migration 1740000006000 lets the cascade
+  through by testing whether the parent row still exists — gone during a cascade,
+  present on a direct delete. I checked that discriminator in psql before writing
+  the migration rather than guessing from Postgres docs.
+- **A cyclic `groups.parent_id` hangs the entire application.** `group_grants_for`
+  recurses with `UNION ALL` and no cycle guard, so one bad reparent makes
+  `accessible_*`/`can_access_*` never return. Proved with `statement_timeout`.
+  Migration 1740000007000 rejects reparenting that closes a cycle; the controller
+  checks too. I created a real cycle in the dev database while testing this and
+  repaired it, which is the fastest possible demonstration that the guard is
+  needed and that it works.
+- Also: a `PATCH` body of `{parentId: undefined}` used to silently promote a group
+  to top level, because `'parentId' in body` cannot tell "absent" from "explicitly
+  undefined". Redefined as `body?.parentId !== undefined`.
+
+## it.2 — versioning: what "publish" costs, and which permission it needs
+
+`POST /documents/:id/publish`, `GET …/versions[/:number]`, `…/diff`, and
+`POST …/versions/:number/restore`.
+
+- **Publishing is MANAGE.** SPEC.md §1 names four capabilities — read, edit,
+  publish, manage — against three ranks, so one has to absorb two. MANAGE absorbs
+  publish. It is the only defensible direction (WRITE must not be able to make
+  content visible to readers who were deliberately denied it), and `http-errors.ts`
+  already documented that assumption in `forbidden()`'s comment. Restore is WRITE
+  by contrast, because it touches only the draft: no reader's view moves. The
+  grant/revoke test in `cms-versions.e2e-spec.ts` exists because every other
+  publish denial would also pass against a route that 404'd for everyone.
+- **A writer's "current version" is their draft; a reader's is the published
+  head.** So `…/diff` resolves its target from what the caller may do, and a
+  reader's diff provably cannot contain unpublished text (asserted).
+- Concurrent publishes serialise on `FOR UPDATE` of the document row; otherwise
+  two compute N and one loses on the `(document_id, number)` unique index.
+- Diff is line-level LCS over Markdown, ~40 lines, no dependency. Unit-tested by
+  the property the viewer depends on — dropping `add` or `remove` ops
+  reconstructs either side exactly — which a server round-trip would only assert
+  for the one pair of documents I happened to seed.
+
+## Gate hazard: a stray backend server makes Playwright red
+
+`VERIFY_EXIT=1` with **all 102 jest tests green**: `http://127.0.0.1:3100/api/health
+is already used`. A `ts-node src/main.ts` from an earlier iteration still held the
+port and `reuseExistingServer: false` is intentional. Killed the process; the next
+run was green. When the gate is red, check which stage failed before reading test
+output — a red gate with green tests is not a code problem.
+
+## it.2 — CMS frontend, and the bug my own browser test caught
+
+Tree (left dock) + history/diff panel (right dock), keyboard selection, state
+badge, publish/history/diff/restore. Docking recorded in `stores/layout.ts` per
+PLAN §2.6; the history panel is its own view rather than part of the tree, because
+SPEC.md §1 calls it a "version history panel" and PLAN §2.6 makes a module a view —
+which also keeps both movable.
+
+- **The tree hid documents the API had just said the caller may read.** My first
+  version built the hierarchy from `GET /groups`, but that resolves _group_ grants:
+  Carl holds READ on one document directly and on no group, so he gets zero groups
+  back and my tree rendered empty for him. Playwright caught it (`toHaveCount(1)`,
+  received 0). Any group with no visible entry now gets a header from the name the
+  document itself carries. A tree that shows only what the groups endpoint returned
+  is not ACL-filtered, it is ACL-_narrowed_ — a different and quieter bug.
+- **`NONE` is now selectable in the grant editor**, which phase 1 deferred until the
+  override could appear next to something. It is separated from READ/WRITE/MANAGE by
+  a divider and gains an explanation when chosen, because its one non-obvious
+  property — it beats inheritance — is the thing a manager must not learn later.
+- Response shapes moved to `shared/` (PLAN §1: the workspace exists so the frontend
+  cannot drift). A controller that renames a field now breaks `vue-tsc`.
+- The tree's capability computation reads `/permissions/effective` plus the group
+  chain, and **cannot** see a `NONE` override (deny is not a permission, so it is
+  absent from that response). So `can()` only ever _adds_ affordances and the API's
+  404 stays the real answer — noted in `stores/cms.ts` rather than papered over.
+- Both panels call `ensureLoaded()`, which shares one in-flight request. Neither can
+  own the initial fetch: they are independently dockable, so a tree-owned load left
+  the history panel empty whenever the left sidebar was hidden.
+- Deliberate: the snapshot renders as Markdown in a `<pre>`, not styled ProseMirror.
+  Tiptap is phase 3 and a second formatter would mean two definitions of what a
+  document looks like.
+
+## it.2 — SPEC.md §1: the ten function bullets, and one expected-behavior clause
+
+All ten bullets under §1 "Funkce" are implemented and asserted: hierarchy, the
+five document mutations, draft/published separation, publish, immutable version,
+history with author/time/comment, open + diff an older version, restore as new
+draft, the three states in the UI, and read/edit/publish/manage permissions.
+
+§1's separate "Očekávané chování" paragraph adds "Publikování vytvoří novou
+položku v historii verzí **a informuje ostatní klienty o změně**." The first half
+is implemented; the second needs a transport to inform anyone over, and the
+y-websocket server is phase 3 (PLAN §5), with PLAN §4 putting "publish→reader
+refresh" in Playwright's realtime scope for the same reason. Phase 2 ships the
+pull path: the panel refetches after a publish and a reader's next request sees
+the new head. Written to DEFERRED.md rather than treated as satisfied, since the
+phase rule is about the function bullets and this is not one — but a clause that
+is unmet should be written down as unmet regardless of which list it sits in.
+
+Gate: 13 unit + 98 over-HTTP + 12 browser, exit 0.

@@ -341,6 +341,56 @@ describe('access follows the tree', () => {
     const current = await http.get(`/documents/${id}`, bona);
     expect(data(current.body).groupId).toBe(group('engineering'));
   });
+
+  /**
+   * Reparenting a *group* is the case a document move does not cover: the whole
+   * subtree moves, and every document two or three levels down is re-resolved
+   * against the new ancestor chain. Inheritance is computed at read time from
+   * groups.parent_id, so this test is really asserting that the reparent wrote
+   * parent_id and nothing else — no document row is touched, no grant is copied,
+   * and access changes exactly as the new tree says it should.
+   */
+  it('moves a whole subtree when a group is reparented, inheritance included', async () => {
+    const outer = await createGroup('Oddělení Archiv');
+    const inner = await createGroup('Sklad', outer);
+    const id = await createDocument('Staré záznamy', inner);
+
+    // Carl holds nothing here yet, so a two-level descent from an unread group is
+    // invisible to him.
+    expect((await http.get(`/documents/${id}`, carl)).status).toBe(404);
+
+    const grant = await http.post(
+      '/permissions',
+      {
+        subjectKind: 'user',
+        subjectId: user('carl'),
+        targetKind: 'group',
+        targetId: outer,
+        permission: 'READ',
+      },
+      bona,
+    );
+    expect(grant.status).toBe(201);
+    // Reached only by descending outer > inner, which is the resolver recursing
+    // over parent_id rather than any grant on the document.
+    expect((await http.get(`/documents/${id}`, carl)).status).toBe(200);
+
+    // Detach the inner group. Its document must come along: the move changes one
+    // column on the group, so the document stays where it was, in its group.
+    const detached = await http.patch(`/groups/${inner}`, { parentId: null }, bona);
+    expect(detached.status).toBe(200);
+    expect(data(detached.body).parentId).toBeNull();
+
+    const stillInner = await http.get(`/documents/${id}`, bona);
+    expect(data(stillInner.body).groupId).toBe(inner);
+    // Carl's grant is on the former ancestor, which no longer reaches him.
+    expect((await http.get(`/documents/${id}`, carl)).status).toBe(404);
+
+    // And reattaching restores access, because nothing was copied or rewritten —
+    // the same grant, the same document, a different chain above it.
+    expect((await http.patch(`/groups/${inner}`, { parentId: outer }, bona)).status).toBe(200);
+    expect((await http.get(`/documents/${id}`, carl)).status).toBe(200);
+  });
 });
 
 /**

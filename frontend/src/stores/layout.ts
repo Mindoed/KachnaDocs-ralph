@@ -28,12 +28,24 @@ export interface ViewDescriptor {
  *  - cms: documents are the primary object, so the tree lives in the left
  *    sidebar next to the ribbon that opens it, leaving the main area for content
  *  - editor: widest surface, needs the main area
+ *  - versions: the other half of the CMS interaction — the tree picks a
+ *    document, history reads it — so it sits opposite the tree rather than
+ *    competing with it for the left sidebar. SPEC.md §1 asks for a "version
+ *    history panel", which reads as its own view, and PLAN §2.6 lets a module be
+ *    a view; that keeps both panels movable.
  *  - permissions / tasks / chat: reference surfaces consulted while reading a
  *    document, so the right sidebar; chat is also the only view worth keeping
  *    open beside a document
  */
 export const VIEWS: ViewDescriptor[] = [
-  { id: 'cms', title: 'Dokumentace', icon: '🗂', preferredDock: 'left', available: false },
+  { id: 'cms', title: 'Dokumentace', icon: '🗂', preferredDock: 'left', available: true },
+  {
+    id: 'versions',
+    title: 'Historie verzí',
+    icon: '🕘',
+    preferredDock: 'right',
+    available: true,
+  },
   { id: 'editor', title: 'Editor', icon: '✎', preferredDock: 'main', available: false },
   { id: 'permissions', title: 'Oprávnění', icon: '🔐', preferredDock: 'right', available: true },
   { id: 'tasks', title: 'Úkoly', icon: '☑', preferredDock: 'right', available: false },
