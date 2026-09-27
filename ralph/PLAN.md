@@ -106,16 +106,26 @@ complete that `verify` does not check.
 ```
 npm run verify
   1. docker compose up -d db          # postgres+pgvector, dedicated test database
-  2. npm run migrate && npm run seed  # idempotent seed, dev identities + fixtures
-  3. npm run lint
-  4. npm run typecheck                # both workspaces
-  5. npm run test                     # jest unit + supertest e2e
-  6. npm run test:e2e                 # playwright, realtime specs only
+  2. npm run db:wait                  # TCP probe; compose can report up before postgres accepts
+  3. npm run migrate + migrate:test   # BOTH databases, explicitly
+  4. npm run seed                     # idempotent; self-verifies fixtures against the SQL ACL
+  5. npm run lint
+  6. npm run typecheck                # all three workspaces
+  7. npm run test                     # jest unit
+  8. npm run test:e2e                 # jest over real HTTP, then playwright
 ```
 
 Rules for the gate:
 
 - Exit nonzero on any failure. Never weaken an assertion to get green. Never commit a `.skip`.
+- **Migrating and seeding are explicit steps, against both databases.** A version of this script left
+  migration to whatever had run earlier, so a green run proved only that the schema happened to match.
+- **The seed verifies itself.** `verifyFixture()` re-derives the fixture's ACL expectations through the
+  real SQL functions and throws if they disagree, because a wrongly-seeded world makes every ACL
+  assertion vacuous — the single failure mode where a green suite means nothing.
+- **`test:e2e` boots the API with `app.listen(0)` and talks real HTTP.** `tsc` cannot see a missing
+  composite primary key or a wrong-arity SQL function call; both shipped past typecheck and were caught
+  only by a running server.
 - Frontend correctness outside the realtime specs is `typecheck` + `vite build` + human review. That is
   accepted, not a gap to fix mid-loop.
 - Playwright is scoped to realtime behavior (two-context Yjs sync, remote cursors, publish→reader refresh,

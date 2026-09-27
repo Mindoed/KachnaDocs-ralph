@@ -22,8 +22,16 @@ since the last one. Also read ralph/PLAN.md (architecture, decisions, guardrails
 - **The verify gate from ralph/PLAN.md §4, working, before any feature work.** A gate that does not run is the
   single worst outcome of this phase. Playwright must be installed with a chromium browser and have one
   trivially passing spec so `npm run test:e2e` is proven wired.
+  - `npm run lint` needs root eslint + prettier config files: the npm scripts exist but the configs do not.
+    Creating them is part of the gate, not an afterthought.
+  - The e2e suite must **boot the API and hit it over HTTP**, not just typecheck. Two real defects (a
+    missing composite primary key, a wrong-arity SQL call) were invisible to `tsc` and only appeared once
+    the server was running.
 - Frontend shell: activity ribbon, left/right sidebars, main area, view-docking store (§2.6). Empty views
   are fine at this point — the shell must just build and render.
+- Migration gotchas already paid for, do not repay them: node-pg-migrate's `primaryKey: { columns: [...] }`
+  table option emits **no** constraint; `pgm.createEnum()` returns a statement, not a type name (use
+  `pgm.createType`); backticks inside a `pgm.sql` template literal terminate the JS string.
 
 ## Part B — SPEC.md §3, the actual phase goal
 

@@ -72,10 +72,16 @@ export class DiscordIdentityProvider implements IdentityProvider {
    * the ACL stores role ids, not the mechanism that produced them.
    */
   async fetchRoleMembership(accessToken: string): Promise<ExternalRole[]> {
-    const guilds = await this.authedGet<Array<{ id: string; roles?: unknown }>>(accessToken, '/users/@me/guilds');
+    const guilds = await this.authedGet<Array<{ id: string; roles?: unknown }>>(
+      accessToken,
+      '/users/@me/guilds',
+    );
     const roles: ExternalRole[] = [];
     for (const guild of guilds) {
-      const raw = await this.authedGet<Array<{ id: string; name: string }>>(accessToken, `/guilds/${guild.id}/roles`);
+      const raw = await this.authedGet<Array<{ id: string; name: string }>>(
+        accessToken,
+        `/guilds/${guild.id}/roles`,
+      );
       for (const role of raw) {
         if (role.id === guild.id) continue; // @everyone
         roles.push({ externalId: role.id, name: role.name });

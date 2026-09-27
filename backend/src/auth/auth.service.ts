@@ -3,7 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import type { AuthUser } from '@kachnadocs/shared';
 import { readEnv } from '../env';
 import { UsersService } from '../users/users.service';
-import { IDENTITY_PROVIDER, type IdentityProvider } from './identity-provider';
+import type { IdentityProvider } from './identity-provider';
 
 @Injectable()
 export class AuthService {

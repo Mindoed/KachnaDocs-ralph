@@ -1,5 +1,3 @@
-import type { AuthUser } from '@kachnadocs/shared';
-
 /**
  * Identity abstraction (PLAN.md §2.2). Nothing outside the provider
  * implementations may know whether an identity came from Discord or from the
@@ -24,5 +22,3 @@ export interface ExternalRole {
   externalId: string;
   name: string;
 }
-
-export const IDENTITY_PROVIDER = Symbol('IDENTITY_PROVIDER');

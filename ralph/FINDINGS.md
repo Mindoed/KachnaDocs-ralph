@@ -69,3 +69,52 @@ eslint/prettier configs (root `lint` script currently has no config file),
 Swagger. `npm run verify` fails.
 
 Note: `.env` was created from `.env.example` for manual testing; gitignored.
+
+## Phase 1 — COMPLETE (`npm run verify` → exit 0)
+
+Gate: 5 unit + 27 jest-over-real-HTTP + 9 Playwright, plus lint/typecheck/build across all three
+workspaces.
+
+Things that surfaced only by running the gate, never from `tsc`:
+
+1. **pgvector was never installed.** `/api/health` reports `extversion` from `pg_extension` and the
+   health e2e asserts it is non-null — which failed on first run. The image ships the extension but
+   does not create it, and extensions are per-database, so migration 1740000004000 creates it and runs
+   against both DBs. The user asked for pgvector in phase 1 precisely so this would not be discovered
+   in phase 5; the assertion is what made "initialized" mean something rather than "a dependency we
+   happen to be running".
+2. **`DISCORD_REDIRECT_URI` was wrong in both `.env.example` and `env.ts`** — missing the `/api`
+   prefix that `setGlobalPrefix` adds. Undetectable without a real Discord app (the failure is at
+   Discord's consent redirect, outside this repo), so it is now commented at both sites and pinned by a
+   unit test on `buildAuthorizeUrl()`.
+3. **Two Playwright assertions were written against guesses about the fixture, and both were wrong**
+   (expected 1 grant for Ana, actual 3; expected 2 explicit grants for Bona, actual 4). Queried
+   `accessible_*` in psql for the real numbers instead of loosening the assertions — and the corrected
+   version is stronger, because Ana's three rows cover the `role` and `role-inherited` sources on one
+   screen. *Write assertions from the fixture, not from the fixture as imagined.*
+4. **Jest hung after a green run** — the pg pool kept sockets open; `closePool()` in `stopServer()`.
+   A gate that passes and then times out is a gate that fails randomly, which is worse than red.
+
+Decisions worth carrying forward:
+
+- **`test` and `test:e2e` were the same command.** Now split (`--testPathIgnorePatterns` /
+  `--testMatch`); "run the unit tests" no longer boots Nest and Postgres.
+- **Playwright's webServer is `node scripts/serve-e2e.mjs`**, which migrates + seeds the test DB then
+  runs the API on :3100 with `NODE_ENV=test`. A node launcher rather than `FOO=bar npm start`, because
+  npm scripts run under cmd.exe on Windows where inline env assignment is a different language. It
+  spawns ts-node's bin directly because npm on Windows resolves through a `.cmd` whose shell wrapper
+  Playwright's SIGTERM orphans — the leftover held the port and the next run died on EADDRINUSE.
+- **The API serves `frontend/dist` when it exists** (`bootstrap.ts`), so the browser suite and any
+  single-process deploy get one origin: no CORS, no Vite proxy pointed at a port nobody owns.
+- **`/permissions/subjects` and `/permissions/targets`** added so SPEC.md:88 ("vyhledej a přidej práva")
+  could be met without free-text UUID inputs. Both require managing *something*, so administering one
+  document does not hand over a directory of the whole organisation.
+- **Discord callback now 302s to `FRONTEND_ORIGIN#token=…`** instead of returning JSON (which no
+  browser flow can consume); the SPA strips the fragment with `history.replaceState`. Fragment rather
+  than query: never sent to servers, absent from `Referer`, absent from proxy logs.
+- **`NONE` stays out of the grant UI** on purpose — DEFERRED.md.
+
+Scope line for the browser suite, so it does not sprawl: it owns real-browser concerns (bundle boots,
+session survives reload, docking persists, grant round-trip, SPA fallback). ACL *decisions* stay in
+jest, which covers the same code far faster. The grant test revokes what it grants, which is what lets
+it share the seeded fixture instead of needing an isolated database.
