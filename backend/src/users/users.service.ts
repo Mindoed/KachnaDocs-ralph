@@ -75,10 +75,10 @@ export class UsersService {
       const id = rows[0]?.id;
       if (id) roleIds.push(id);
     }
-    await query(
-      `DELETE FROM user_discord_roles WHERE user_id = $1 AND NOT (role_id = ANY($2::uuid[]))`,
-      [userId, roleIds],
-    );
+    await query(`DELETE FROM user_discord_roles WHERE user_id = $1 AND NOT (role_id = ANY($2::uuid[]))`, [
+      userId,
+      roleIds,
+    ]);
     for (const roleId of roleIds) {
       await query(
         `INSERT INTO user_discord_roles (user_id, role_id)

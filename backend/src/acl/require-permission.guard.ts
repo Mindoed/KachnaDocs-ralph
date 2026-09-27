@@ -1,9 +1,4 @@
-import {
-  CanActivate,
-  ExecutionContext,
-  Injectable,
-  SetMetadata,
-} from '@nestjs/common';
+import { applyDecorators, CanActivate, ExecutionContext, Injectable, SetMetadata } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { Request } from 'express';
 import type { AuthUser, Permission } from '@kachnadocs/shared';
@@ -15,15 +10,23 @@ export const PERMISSION_TARGET = 'kachnadocs:permission-target';
 
 export type TargetKind = 'document' | 'group';
 
-/** Require `permission` on the resource identified by the route param. */
-export const RequirePermission = (permission: Permission, target: TargetKind = 'document') => {
-  const deco = SetMetadata(REQUIRED_PERMISSION, permission);
-  const deco2 = SetMetadata(PERMISSION_TARGET, target);
-  return (target2: unknown, key?: string, desc?: PropertyDescriptor) => {
-    deco(target2 as never, key as never, desc as never);
-    return deco2(target2 as never, key as never, desc as never);
-  };
-};
+/**
+ * Require `permission` on the resource named by the route's `:id` param.
+ *
+ * applyDecorators rather than a hand-written composite: calling SetMetadata
+ * ourselves and returning its result types the descriptor as
+ * TypedPropertyDescriptor<unknown>, which TypeScript then refuses on any
+ * concretely-typed handler.
+ */
+export function RequirePermission(
+  permission: Permission,
+  targetKind: TargetKind = 'document',
+): MethodDecorator & ClassDecorator {
+  return applyDecorators(
+    SetMetadata(REQUIRED_PERMISSION, permission),
+    SetMetadata(PERMISSION_TARGET, targetKind),
+  );
+}
 
 /**
  * Enforces SPEC.md §3: the backend decides, always. A handler that forgot the

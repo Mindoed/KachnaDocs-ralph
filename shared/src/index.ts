@@ -31,11 +31,29 @@ export type PermissionSource =
   | { kind: 'direct' }
   | { kind: 'inherited'; viaTargetKind: PermissionTargetKind; viaTargetId: string; viaTargetName: string }
   | { kind: 'role'; roleId: string; roleName: string }
-  | { kind: 'role-inherited'; roleId: string; roleName: string; viaTargetKind: PermissionTargetKind; viaTargetId: string; viaTargetName: string };
+  | {
+      kind: 'role-inherited';
+      roleId: string;
+      roleName: string;
+      viaTargetKind: PermissionTargetKind;
+      viaTargetId: string;
+      viaTargetName: string;
+    };
 
 export interface EffectivePermission {
   permission: Permission;
   source: PermissionSource;
+}
+
+/**
+ * One row of `GET /permissions/effective`: an effective grant resolved for a
+ * user, naming what it applies to and where it came from. Lives here so the
+ * admin view cannot drift from the controller's response.
+ */
+export interface EffectiveGrant extends EffectivePermission {
+  targetKind: PermissionTargetKind;
+  targetId: string;
+  targetName: string;
 }
 
 export type DocumentState = 'Draft' | 'Published' | 'Archived';

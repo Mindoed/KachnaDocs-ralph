@@ -26,7 +26,7 @@ export class PermissionService {
   async bestDocumentGrant(
     actorId: string,
     documentId: string,
-  ): Promise<GrantRow & { permission: Permission } | null> {
+  ): Promise<(GrantRow & { permission: Permission }) | null> {
     const rows = await query<{ permission: Permission; source: PermissionSource }>(
       `SELECT permission, source FROM accessible_documents($1, 'READ')
         WHERE document_id = $2
@@ -38,11 +38,7 @@ export class PermissionService {
     return row ? { permission: row.permission, source: row.source } : null;
   }
 
-  async canAccessDocument(
-    actorId: string,
-    documentId: string,
-    required: Permission,
-  ): Promise<boolean> {
+  async canAccessDocument(actorId: string, documentId: string, required: Permission): Promise<boolean> {
     const rows = await query<{ ok: boolean }>(
       'SELECT can_access_document($1, $2, $3::permission_kind) AS ok',
       [actorId, documentId, required],
@@ -51,10 +47,11 @@ export class PermissionService {
   }
 
   async canAccessGroup(actorId: string, groupId: string, required: Permission): Promise<boolean> {
-    const rows = await query<{ ok: boolean }>(
-      'SELECT can_access_group($1, $2, $3::permission_kind) AS ok',
-      [actorId, groupId, required],
-    );
+    const rows = await query<{ ok: boolean }>('SELECT can_access_group($1, $2, $3::permission_kind) AS ok', [
+      actorId,
+      groupId,
+      required,
+    ]);
     return rows[0]?.ok === true;
   }
 

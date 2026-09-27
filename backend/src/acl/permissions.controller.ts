@@ -1,23 +1,22 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Get,
-  Param,
-  Post,
-  Query,
-} from '@nestjs/common';
-import {
-  GRANT_KINDS,
-  type GrantKind,
-  type Permission,
-  type PermissionSource,
-} from '@kachnadocs/shared';
+import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
+import { GRANT_KINDS, type GrantKind, type Permission, type PermissionSource } from '@kachnadocs/shared';
 import { PermissionService } from './permission.service';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { query } from '../db';
 import { notFound, validationFailed } from '../http-errors';
 import type { AuthUser } from '@kachnadocs/shared';
+
+interface SubjectDto {
+  kind: 'user' | 'discord_role';
+  id: string;
+  name: string;
+}
+
+interface TargetDto {
+  kind: 'group' | 'document';
+  id: string;
+  name: string;
+}
 
 interface GrantDto {
   id: string;
@@ -65,10 +64,75 @@ export class PermissionsController {
     return { userId: target, grants: await this.permissions.effectiveForUser(target) };
   }
 
+  /**
+   * Subjects a grant can be assigned to — users and Discord roles by name
+   * (SPEC.md:88 "Vyhledat a přidat práva konkrétnímu uživateli nebo Discord roli").
+   *
+   * Only callers who MANAGE something may search. A user who administers one
+   * document does not thereby get a directory of everyone in the organisation,
+   * which is why this is not simply open to any authenticated user; the rule is
+   * deliberately the same one `/permissions/effective?userId=` applies.
+   */
+  @Get('subjects')
+  async subjects(@CurrentUser() me: AuthUser, @Query('q') q?: string): Promise<{ subjects: SubjectDto[] }> {
+    const manageable = await this.permissions.effectiveForUser(me.id);
+    if (!manageable.some((g) => g.permission === 'MANAGE')) throw notFound();
+
+    // ILIKE on a caller-supplied fragment: `%` and `_` are wildcards, which for a
+    // name search is harmless (worst case the caller sees more names than they
+    // typed) but is escaped nowhere so a stray underscore does not confuse it.
+    const like = `%${(q ?? '').trim()}%`;
+    const rows = await query<SubjectDto>(
+      `SELECT 'user' AS kind, u.id, u.display_name AS name
+         FROM users u
+        WHERE u.display_name ILIKE $1
+        UNION ALL
+       SELECT 'discord_role' AS kind, r.id, r.name
+         FROM discord_roles r
+        WHERE r.name ILIKE $1
+        ORDER BY name, kind
+        LIMIT 50`,
+      [like],
+    );
+    return { subjects: rows };
+  }
+
+  /**
+   * Targets the caller may grant on — the counterpart of `/subjects`.
+   *
+   * Scoped by the SQL ACL functions rather than by a WHERE clause written here,
+   * so it cannot drift from what the rest of the app considers manageable; that
+   * is the whole reason those functions exist (PLAN §2.3).
+   */
+  @Get('targets')
+  async targets(@CurrentUser() me: AuthUser, @Query('q') q?: string): Promise<{ targets: TargetDto[] }> {
+    const manageable = await this.permissions.effectiveForUser(me.id);
+    if (!manageable.some((g) => g.permission === 'MANAGE')) throw notFound();
+
+    const like = `%${(q ?? '').trim()}%`;
+    const rows = await query<TargetDto>(
+      `SELECT 'group' AS kind, g.id, g.name
+         FROM groups g
+        WHERE g.name ILIKE $1
+          AND can_access_group($2, g.id, 'MANAGE')
+        UNION ALL
+       SELECT 'document' AS kind, d.id, d.title AS name
+         FROM documents d
+        WHERE d.title ILIKE $1
+          AND can_access_document($2, d.id, 'MANAGE')
+        ORDER BY name, kind
+        LIMIT 50`,
+      [like, me.id],
+    );
+    return { targets: rows };
+  }
+
   /** All explicit grants, restricted to targets the caller can manage. */
   @Get()
   async list(@CurrentUser() me: AuthUser): Promise<GrantDto[]> {
-    const rows = await query<GrantDto & { target_group_id: string | null; target_document_id: string | null }>(
+    const rows = await query<
+      GrantDto & { target_group_id: string | null; target_document_id: string | null }
+    >(
       `SELECT
          p.id,
          CASE WHEN p.subject_user_id IS NOT NULL THEN 'user' ELSE 'discord_role' END AS subject_kind,
