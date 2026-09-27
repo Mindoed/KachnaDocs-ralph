@@ -20,8 +20,9 @@ import { HealthController } from './health.controller';
     AuthService,
     UsersService,
     PermissionService,
-    // Guard runs for every route; routes without @RequirePermission are
-    // public by decision, and that decision is visible at the handler.
+    // Guard runs for every route and defaults to deny: only @Public() routes
+    // are reachable anonymously, so a route becomes public by declaration
+    // rather than by someone forgetting a decorator.
     { provide: APP_GUARD, useClass: RequirePermissionGuard },
     AuthContextMiddleware,
   ],

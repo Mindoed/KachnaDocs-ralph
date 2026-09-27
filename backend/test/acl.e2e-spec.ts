@@ -415,6 +415,22 @@ describe('identity', () => {
     expect(res.status).toBe(401);
   });
 
+  it('requires a token on every route except the declared-public ones', async () => {
+    // The guard defaults to deny: a route is anonymous only if it carries
+    // @Public(). This asserts both halves — that protected routes refuse an
+    // anonymous caller, and that the public set is exactly what we think it is.
+    // If someone adds a route and forgets a decorator, it lands on the 401 side.
+    for (const path of ['/auth/me', '/documents', '/permissions', '/permissions/effective']) {
+      const res = await http.get(path);
+      expect([401, 404]).toContain(res.status);
+      expect(code(res.body)).toBe('unauthorized');
+    }
+    for (const path of ['/health']) {
+      const res = await http.get(path);
+      expect(res.status).toBe(200);
+    }
+  });
+
   it('has no dev login when Discord OAuth would be configured', async () => {
     // Cannot flip env for a running server, so assert the guard exists in code:
     // the handler returns 404 (indistinguishable from "no such route") when

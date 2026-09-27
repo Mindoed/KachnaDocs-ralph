@@ -163,3 +163,30 @@ bullets against the code anyway turned up one that the gate did not actually cov
   then reads as "public by accident". A route-listing test or a default-deny guard would be
   cheap insurance before phase 2.
 - `npm run verify` exits 0 (5 unit + 30 over-HTTP + 9 Playwright).
+
+# Phase 2 — CMS with versioning
+
+## it.1 — default-deny guard, before the route count grows
+
+Phase 1 left `RequirePermissionGuard` returning `true` for any handler without
+`@RequirePermission`. With eight routes that was a review-time concern; phase 2
+adds CRUD for groups, categories, documents and versions, at which point "forgot
+the decorator" and "meant to be public" become indistinguishable — the exact
+shape of bug the phase-1 ACL tests exist to make impossible.
+
+- Guard now denies by default. `@Public()` is what makes a route anonymous;
+  `@RequirePermission(...)` is unchanged. Forgetting `@RequirePermission` still
+  only skips the *grant* check (a signed-in caller gets through), but forgetting
+  `@Public()` now fails closed with 401. Making the grant check itself mandatory
+  would need an explicit `@AuthenticatedOnly()` on routes like `GET /auth/me` —
+  deliberately left for when phase 2's write routes exist and can be listed.
+- `@Public()` added to: `/health`, `POST /auth/dev-login`,
+  `GET /auth/discord/authorize-url`, `GET /auth/discord/callback`.
+- **This closed a real hole, not a hypothetical one**: `GET /documents` has no
+  decorator (it filters in SQL instead), so under the old guard an anonymous
+  request reached the handler and dereferenced `me.id` on an undefined user —
+  a 500 where 401 was correct. Now unreachable.
+- New e2e test asserts both halves: protected routes answer 401 to an anonymous
+  caller, and `/health` is still 200. 31 over-HTTP tests (was 30). Frontend
+  verified unaffected: `auth.ts restore()` already treats any `/auth/me` failure
+  as "not signed in".

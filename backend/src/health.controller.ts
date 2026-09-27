@@ -2,6 +2,7 @@ import { Controller, Get, Res } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { query } from './db';
+import { Public } from './acl/require-permission.guard';
 
 interface DbProbe {
   ok: number;
@@ -23,6 +24,7 @@ export class HealthController {
    * itself 500s is indistinguishable from a crash loop, and the body is the
    * diagnosis the operator needs.
    */
+  @Public()
   @Get()
   @ApiOperation({ summary: 'Liveness plus a real database and pgvector probe' })
   async check(@Res() res: Response): Promise<void> {

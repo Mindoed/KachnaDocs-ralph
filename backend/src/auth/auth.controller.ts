@@ -7,6 +7,7 @@ import { DiscordIdentityProvider } from './discord-identity.provider';
 import { readEnv } from '../env';
 import { notFound, unauthorized, validationFailed } from '../http-errors';
 import { CurrentUser } from './current-user.decorator';
+import { Public } from '../acl/require-permission.guard';
 
 @Controller('auth')
 export class AuthController {
@@ -16,6 +17,7 @@ export class AuthController {
    * Dev-mode login: POST {handle} → session token. Registered only when the
    * dev provider is active, so production cannot authenticate by handle.
    */
+  @Public()
   @Post('dev-login')
   async devLogin(@Body() body: { handle?: string }): Promise<{ token: string; user: AuthUser }> {
     const env = readEnv();
@@ -54,6 +56,7 @@ export class AuthController {
    * is a real hardening step and is listed in ralph/DEFERRED.md rather than
    * quietly skipped.
    */
+  @Public()
   @Get('discord/callback')
   async discordCallback(@Query('code') code: string | undefined, @Res() res: Response): Promise<void> {
     const env = readEnv();
