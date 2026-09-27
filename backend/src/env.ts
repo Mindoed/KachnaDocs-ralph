@@ -53,7 +53,10 @@ export function readEnv(overrides: Partial<Record<string, string>> = {}): AppEnv
     discord: {
       clientId: discordEnabled ? clientId : null,
       clientSecret: discordEnabled ? clientSecret : null,
-      redirectUri: get('DISCORD_REDIRECT_URI', 'http://localhost:3000/auth/discord/callback'),
+      // Includes /api because bootstrap.ts calls setGlobalPrefix('api'); the
+      // default must match the route as registered or the portal's redirect
+      // check fails before the callback ever runs.
+      redirectUri: get('DISCORD_REDIRECT_URI', 'http://localhost:3000/api/auth/discord/callback'),
     },
     discordEnabled,
   };

@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { closePool, query } from './db';
+import { closePool, query, reconfigure } from './db';
 import { DevIdentityProvider } from './auth/dev-identity.provider';
 
 /**
@@ -128,15 +128,30 @@ export async function seed(): Promise<void> {
   // role HR: READ on the HR group, inherited down to Payroll
   await grant(['subject_role_id', 'target_group_id', 'permission'], [f.roles.hr, f.groups.hr, 'READ']);
   // role Engineering: READ + WRITE on its own group
-  await grant(['subject_role_id', 'target_group_id', 'permission'], [f.roles.eng, f.groups.engineering, 'READ']);
-  await grant(['subject_role_id', 'target_group_id', 'permission'], [f.roles.eng, f.groups.engineering, 'WRITE']);
+  await grant(
+    ['subject_role_id', 'target_group_id', 'permission'],
+    [f.roles.eng, f.groups.engineering, 'READ'],
+  );
+  await grant(
+    ['subject_role_id', 'target_group_id', 'permission'],
+    [f.roles.eng, f.groups.engineering, 'WRITE'],
+  );
   // Bona manages the Engineering group personally, not via a role
-  await grant(['subject_user_id', 'target_group_id', 'permission'], [f.users.bona, f.groups.engineering, 'MANAGE']);
+  await grant(
+    ['subject_user_id', 'target_group_id', 'permission'],
+    [f.users.bona, f.groups.engineering, 'MANAGE'],
+  );
   // Carl: read on exactly one document, granted directly
-  await grant(['subject_user_id', 'target_document_id', 'permission'], [f.users.carl, f.documents.runbook, 'READ']);
+  await grant(
+    ['subject_user_id', 'target_document_id', 'permission'],
+    [f.users.carl, f.documents.runbook, 'READ'],
+  );
   // Ana is denied one Payroll document even though her HR role grants it:
   // SPEC.md:82's document-level override
-  await grant(['subject_user_id', 'target_document_id', 'permission'], [f.users.ana, f.documents.salaries, 'NONE']);
+  await grant(
+    ['subject_user_id', 'target_document_id', 'permission'],
+    [f.users.ana, f.documents.salaries, 'NONE'],
+  );
 
   await verifyFixture();
 }
@@ -195,6 +210,14 @@ async function verifyFixture(): Promise<void> {
 }
 
 if (require.main === module) {
+  // Same --env=test convention as scripts/migrate.mjs, so `npm run seed` and
+  // `npm run seed:test` differ by one flag and both stay portable (no cross-env,
+  // no cmd.exe quoting).
+  if (process.argv.includes('--env=test')) {
+    const url = process.env.TEST_DATABASE_URL;
+    if (!url) throw new Error('--env=test requires TEST_DATABASE_URL');
+    reconfigure({ databaseUrl: url });
+  }
   seed()
     .then(async () => {
       // eslint-disable-next-line no-console
