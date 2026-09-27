@@ -143,3 +143,23 @@ bullets against the code anyway turned up one that the gate did not actually cov
 - Also verified rather than assumed: `docs/discord-oauth.md` exists; the grant
   editor really does offer `discord_role` subjects (SPEC.md:88), so the "users and
   Discord roles" bullet is met on the write path, not just the schema.
+
+## it.1 (loop 2) — cancelled by user; fan-out audit attempt + one hardening fix
+
+- Four parallel audit subagents (test vacuity, SPEC §3 coverage, gate honesty, invariant
+  attacks) were launched per the user's request and all four wedged with no output after
+  ~50 min. They were cancelled and the audit was done inline instead.
+- Inline audit found and fixed one real weakness: `POST /permissions` branched on
+  `subjectKind === 'user' ? users : discord_roles` with no validation, so any unrecognized
+  value (`'role'`, `'User'`) silently became a **Discord role** grant — an ACL decision made
+  by typo. Same for `targetKind`. Both are now validated against their legal values, with
+  two e2e tests pinning it (30 jest-over-HTTP now, was 28).
+- Checked and found sound: every read path is ACL-prefixed in SQL (`documentsFilter` has one
+  caller, offset arithmetic correct); grant create/revoke both require MANAGE on the exact
+  target, so managing one document cannot escalate; denial is 404-shaped everywhere.
+- **Noted, not changed:** `RequirePermissionGuard` fails open when a handler has no
+  `@RequirePermission` decorator (require-permission.guard.ts:51). Intentional today (health,
+  login are public) and the comment says so, but phases 2-5 add many routes and omission
+  then reads as "public by accident". A route-listing test or a default-deny guard would be
+  cheap insurance before phase 2.
+- `npm run verify` exits 0 (5 unit + 30 over-HTTP + 9 Playwright).

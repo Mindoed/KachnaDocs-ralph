@@ -338,6 +338,49 @@ describe('grant management over HTTP', () => {
     expect(res.status).toBe(400);
     expect(code(res.body)).toBe('validation_failed');
   });
+
+  it('rejects an unknown subject kind instead of guessing it', async () => {
+    // The grant path derives the subject column from subjectKind, so an
+    // unrecognized value used to fall through to "discord role". A grant to the
+    // wrong KIND of principal is an ACL decision made by typo.
+    const res = await http.post(
+      '/permissions',
+      {
+        subjectKind: 'role',
+        subjectId: user('carl'),
+        targetKind: 'document',
+        targetId: doc('privateIdea'),
+        permission: 'READ',
+      },
+      await loginAs('bona'),
+    );
+    expect(res.status).toBe(400);
+    expect(code(res.body)).toBe('validation_failed');
+
+    // ...and nothing was stored for the pair we attempted. (Carl holds a
+    // fixture grant on another document, so match the target as well.)
+    const grants = await http.get('/permissions', await loginAs('bona'));
+    const rows = grants.body as { subject_id: string; target_id: string }[];
+    expect(rows.filter((g) => g.subject_id === user('carl') && g.target_id === doc('privateIdea'))).toEqual(
+      [],
+    );
+  });
+
+  it('rejects an unknown target kind instead of guessing it', async () => {
+    const res = await http.post(
+      '/permissions',
+      {
+        subjectKind: 'user',
+        subjectId: user('carl'),
+        targetKind: 'workspace',
+        targetId: doc('privateIdea'),
+        permission: 'READ',
+      },
+      await loginAs('bona'),
+    );
+    expect(res.status).toBe(400);
+    expect(code(res.body)).toBe('validation_failed');
+  });
 });
 
 describe('identity', () => {

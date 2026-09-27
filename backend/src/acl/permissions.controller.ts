@@ -172,6 +172,17 @@ export class PermissionsController {
     if (!subjectKind || !subjectId || !targetKind || !targetId) {
       throw validationFailed('subjectKind, subjectId, targetKind, targetId are required');
     }
+    // Validated against their legal values rather than branched on directly:
+    // below, `subjectKind === 'user' ? users : discord_roles` means anything
+    // that is not exactly 'user' — a typo, a capitalized 'User' — becomes a
+    // Discord role, and a wrong subject kind is a grant handed to the wrong
+    // kind of principal. Same for the target.
+    if (subjectKind !== 'user' && subjectKind !== 'discord_role') {
+      throw validationFailed("subjectKind must be 'user' or 'discord_role'");
+    }
+    if (targetKind !== 'group' && targetKind !== 'document') {
+      throw validationFailed("targetKind must be 'group' or 'document'");
+    }
     if (!GRANT_KINDS.includes(permission as GrantKind)) {
       throw validationFailed(`permission must be one of ${GRANT_KINDS.join(', ')}`);
     }
