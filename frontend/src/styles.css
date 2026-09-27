@@ -1,0 +1,72 @@
+:root {
+  --bg: #1e1f24;
+  --bg-raised: #26272e;
+  --bg-hover: #2f313a;
+  --border: #34363f;
+  --fg: #dcdde3;
+  --fg-dim: #9a9daa;
+  --accent: #4f8ff7;
+  --danger: #e06c6c;
+  --mono: ui-monospace, 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+  font-family:
+    'Segoe UI',
+    system-ui,
+    -apple-system,
+    sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 14px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+input,
+select {
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+h1,
+h2,
+h3 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: 0 0 0.5rem;
+}
+
+.muted {
+  color: var(--fg-dim);
+}
+
+.error {
+  color: var(--danger);
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
