@@ -225,3 +225,25 @@ the correct answer.
 
 One verify at a time, and read the exit code from the run you launched rather
 than starting another when a log looks stalled.
+
+## it.1 — schema assertions, and one change I tested before keeping
+
+- Added `backend/test/cms-schema.e2e-spec.ts` (8 tests, 39 over-HTTP total): the
+  immutability trigger on UPDATE and DELETE, uniqueness of (document, number),
+  draft text genuinely diverging from the published snapshot, the never-published
+  document having no versions, heading anchors, and category-via-group visibility.
+  A schema with no test is how phase 1's SPEC.md:95 gap happened.
+- **Reverted a speculative fix.** I assumed `stopServer()`'s `closePool()` left
+  `db.ts` holding a dead pool for the next test file in the same Jest process,
+  and wrote lazy pool re-creation for it. Running the suite disproved it: Jest
+  sandboxes the module registry per test file, so each file gets a fresh pool.
+  Reverted and tested the new spec as-is — 3 suites, 39 tests, green. Recorded
+  because "add machinery for a problem I inferred" is the failure mode to watch.
+- Real bug in my own new test, caught by running it: it called `closePool()` in
+  `afterAll` *and* `stopServer()`, which had already closed it —
+  `Called end on pool more than once`. The fix was to delete my call, not to
+  make `closePool()` idempotent.
+- DEFERRED.md: categories are deliberately not an ACL target (a third
+  inheritance path would break the phase-1 single-decision-point invariant), and
+  `y_state` waits for phase 3 — publish reads the same columns phase 3 will fill.
+- Gate: 5 unit + 39 over-HTTP + 9 Playwright, exit 0.
