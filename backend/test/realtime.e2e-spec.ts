@@ -587,7 +587,150 @@ describe('persistence', () => {
   });
 });
 
-// ------------------------------------------------------------------- framing
+// ------------------------------------------------- the draft replaced from outside
+
+/**
+ * What happens to a live room when something *other* than the websocket rewrites
+ * the draft.
+ *
+ * PLAN §2.3 made `y_state` authoritative, and that quietly promoted these
+ * endpoints from "writes the draft" to "writes one of two things, the other of
+ * which still wins". `PUT /draft` and restore-as-draft both replace `draft_body`;
+ * if a room is open it still holds the previous content and will re-project
+ * `draft_body` from that on its next autosave. So without the gateway being told,
+ * each of these endpoints succeeds, and then undoes itself inside the debounce
+ * window — and the UI, having been told `saved: true`, shows the restored content
+ * right up until it doesn't.
+ */
+describe('a draft replaced while the document is open', () => {
+  it('discards the live room rather than letting it overwrite the write', async () => {
+    const replaced = `nahrazeno-${Date.now()}`;
+    const peer = await connect(RUNBOOK, await mintToken(RUNBOOK, bona));
+    await waitFor(() => peer.ydoc.getXmlFragment(RT_FRAGMENT).length > 0, 'the document');
+    // An unsaved-by-hand edit, so the room is genuinely dirty when the write lands.
+    appendParagraph(peer.ydoc, `původní-${Date.now()}`);
+
+    const res = await http.put(
+      `/documents/${RUNBOOK}/draft`,
+      {
+        body: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: replaced }] }] },
+        markdown: replaced,
+      },
+      bona,
+    );
+    expect(res.status).toBe(200);
+
+    // The editor is disconnected: it was editing a document that no longer exists
+    // on the server, and letting it carry on would be the silent version of the
+    // bug.
+    const code = await peer.closed;
+    expect(code).toBeGreaterThan(1000);
+
+    // Wait past the debounce. This is the whole assertion — a room that flushed on
+    // the way out would write its stale state over `replaced` and re-derive
+    // draft_body from it, so the row would come back describing the *old* content.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    const row = await draftRow(RUNBOOK);
+    expect(JSON.stringify(row.draft_body)).toContain(replaced);
+    expect(String(row.draft_markdown)).toContain(replaced);
+
+    // And a client arriving afterwards gets the replacement, not the pre-write
+    // state: y_state was nulled, so the room re-seeds from draft_body.
+    const after = await connect(RUNBOOK, await mintToken(RUNBOOK, bona));
+    await waitFor(
+      () => after.ydoc.getXmlFragment(RT_FRAGMENT).toString().includes(replaced),
+      'a rejoining client to see the replacement',
+    );
+    after.dispose();
+  });
+
+  it('does not resurrect the draft when an older version is restored', async () => {
+    const target = await http.post(
+      '/documents',
+      { title: 'Návrat verze', groupId: group('engineering') },
+      bona,
+    );
+    const id = (target.body as { id: string }).id;
+    const v1 = `verze-jedna-${Date.now()}`;
+    await http.put(
+      `/documents/${id}/draft`,
+      {
+        body: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: v1 }] }] },
+        markdown: v1,
+      },
+      bona,
+    );
+    await http.post(`/documents/${id}/publish`, { comment: 'v1' }, bona);
+    const v2 = `verze-dva-${Date.now()}`;
+    await http.put(
+      `/documents/${id}/draft`,
+      {
+        body: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: v2 }] }] },
+        markdown: v2,
+      },
+      bona,
+    );
+
+    // Someone has the document open on v2 while the restore happens.
+    const peer = await connect(id, await mintToken(id, bona));
+    await waitFor(() => peer.ydoc.getXmlFragment(RT_FRAGMENT).toString().includes(v2), 'the v2 draft');
+
+    const restored = await http.post(`/documents/${id}/versions/1/restore`, undefined, bona);
+    expect(restored.status).toBe(201);
+    await peer.closed;
+
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    const row = await draftRow(id);
+    expect(JSON.stringify(row.draft_body)).toContain(v1);
+    expect(JSON.stringify(row.draft_body)).not.toContain(v2);
+
+    // The column the *next* reader is served from, which is the one that would
+    // have kept v2 alive had only draft_body been rewritten.
+    const rejoined = await connect(id, await mintToken(id, bona));
+    await waitFor(
+      () => rejoined.ydoc.getXmlFragment(RT_FRAGMENT).toString().includes(v1),
+      'a rejoining client to see the restored version',
+    );
+    expect(rejoined.ydoc.getXmlFragment(RT_FRAGMENT).toString()).not.toContain(v2);
+    rejoined.dispose();
+  });
+
+  it('publishes whatever the editor typed moments earlier, not a debounce window less', async () => {
+    // Persistence is debounced, so this test's whole job is timing: type, then
+    // publish inside that window. The bug it pins is a published version that is
+    // silently missing the last few hundred milliseconds of typing — permanent,
+    // because a version cannot be amended once written.
+    const target = await http.post(
+      '/documents',
+      { title: 'Okamžitá publikace', groupId: group('engineering') },
+      bona,
+    );
+    const id = (target.body as { id: string }).id;
+    await http.put(
+      `/documents/${id}/draft`,
+      {
+        body: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'start' }] }] },
+        markdown: 'start',
+      },
+      bona,
+    );
+
+    const peer = await connect(id, await mintToken(id, bona));
+    await waitFor(() => peer.ydoc.getXmlFragment(RT_FRAGMENT).length > 0, 'the document');
+    const lastWords = `poslední-slova-${Date.now()}`;
+    appendParagraph(peer.ydoc, lastWords);
+
+    // Deliberately no sleep: still inside PERSIST_DEBOUNCE_MS.
+    const published = await http.post(`/documents/${id}/publish`, { comment: 'hned' }, bona);
+    expect(published.status).toBe(201);
+    const version = (published.body as { version: number }).version;
+
+    const snapshot = await http.get(`/documents/${id}/versions/${version}`, bona);
+    expect(JSON.stringify(snapshot.body)).toContain(lastWords);
+
+    peer.dispose();
+  });
+});
 
 describe('the wire format', () => {
   it('is the y-websocket framing, byte for byte', async () => {

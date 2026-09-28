@@ -11,6 +11,7 @@ import { DocumentsController } from './cms/documents.controller';
 import { GroupsController } from './cms/groups.controller';
 import { CategoriesController } from './cms/categories.controller';
 import { VersionsController } from './cms/versions.controller';
+import { ReferencesController } from './cms/references.controller';
 import { RealtimeModule } from './rt/realtime.module';
 import { HealthController } from './health.controller';
 
@@ -25,6 +26,7 @@ import { HealthController } from './health.controller';
     GroupsController,
     CategoriesController,
     VersionsController,
+    ReferencesController,
   ],
   providers: [
     AuthService,

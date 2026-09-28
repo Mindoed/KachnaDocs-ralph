@@ -4,6 +4,7 @@ import type { AuthUser } from '@kachnadocs/shared';
 import { diffLines, summarize } from './diff';
 import { PermissionService } from '../acl/permission.service';
 import { RequirePermission } from '../acl/require-permission.guard';
+import { RealtimeGateway } from '../rt/realtime.gateway';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { query, withTransaction } from '../db';
 import { notFound, validationFailed } from '../http-errors';
@@ -69,7 +70,13 @@ export function extractHeadings(body: unknown): Array<{ anchor: string; level: n
 @ApiTags('documents')
 @Controller('documents')
 export class VersionsController {
-  constructor(private readonly permissions: PermissionService) {}
+  constructor(
+    private readonly permissions: PermissionService,
+    // Resolved across modules: RealtimeModule exports the gateway and AppModule
+    // imports it, which is how a CMS controller reaches the websocket layer
+    // without the CMS code owning any of it.
+    private readonly realtime: RealtimeGateway,
+  ) {}
 
   /**
    * Snapshot the current draft as a new immutable version.
@@ -77,6 +84,13 @@ export class VersionsController {
    * The row lock on the document serialises concurrent publishes, so two
    * editors publishing at once get version N and N+1 rather than both computing
    * N and one of them dying on the (document_id, number) unique index.
+   *
+   * The gateway flush runs *before* that transaction, never inside it. Two
+   * reasons, and the first is a deadlock: the flush is an UPDATE on the row this
+   * transaction has locked `FOR UPDATE`, so issuing it from within would have the
+   * request wait on a lock only it can release. The second is correctness — the
+   * flush exists so the snapshot includes whatever an editor typed inside the
+   * current debounce window, and a version cannot be amended afterwards.
    */
   @Post(':id/publish')
   @RequirePermission('MANAGE', 'document')
@@ -86,6 +100,7 @@ export class VersionsController {
     @Body() body: { comment?: string },
   ): Promise<unknown> {
     const comment = body?.comment?.trim() || null;
+    await this.realtime.flushNow(id);
     const published = await withTransaction(async (client) => {
       // Locking read: also the ACL re-check, so a grant revoked mid-request
       // cannot publish.
@@ -300,12 +315,24 @@ export class VersionsController {
 
     const [updated] = await query<{ state: string }>(
       `UPDATE documents
-          SET draft_body = $2, draft_markdown = $3, draft_updated_at = now(), updated_at = now()
+          SET draft_body = $2, draft_markdown = $3, draft_updated_at = now(), updated_at = now(),
+              y_state = NULL
         WHERE id = $1
         RETURNING state`,
       [id, JSON.stringify(row.body), row.markdown],
     );
     if (!updated) throw notFound();
+    // Two halves of one fix, and nulling y_state is the half that matters.
+    // Plan §2.3 made y_state authoritative, so writing only draft_body would have
+    // left the *stored* Yjs state describing the pre-restore content: the next
+    // person to open the document would be seeded from it and see the restore
+    // undone. Clearing it puts the document back on the same path a phase-2
+    // document takes — seed from draft_body, which now holds version N.
+    //
+    // Discarding the room is the other half: someone may be editing right now, and
+    // their next autosave would write that stale state straight back into the
+    // column we just cleared.
+    this.realtime.discard(id);
     return { restored: true, number: wanted, state: updated.state };
   }
 }

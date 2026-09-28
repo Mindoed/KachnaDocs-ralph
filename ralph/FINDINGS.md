@@ -409,3 +409,106 @@ with no ACL in sight, since its whole job is to be a fact the filtered query
 could not fake.
 
 Gate: 13 unit + 103 over-HTTP + 13 browser, exit 0 on the committed tree.
+
+---
+
+## Phase 3, stretch 1 — the gateway, and three bugs I wrote myself
+
+Gate at this point: 146 backend tests across 9 suites, green, process exits
+clean. No frontend yet, so no promise and no browser tests yet — the realtime
+suite speaks the wire protocol directly.
+
+### The dropped-frame race (the one that mattered)
+
+I attached `message` and `close` handlers *after* the awaits in the authorisation
+path. A browser sends its sync step 1 the instant the upgrade completes — which is
+during exactly that window — and `ws` does not buffer, so the frame was gone. The
+client had asked for the document, the server had dropped the ask, and nothing
+would ever answer it. In a browser that is "open the editor, see an empty page,
+reload, see the document".
+
+I found it by printing frame counts rather than by reading the code, and reading
+the code is the part worth recording: I had reviewed that function and seen the
+ordering as obviously correct, because authorise-then-serve *is* the right order.
+The bug was that I had attached the *listeners* on the serve side of that divide,
+when only the *applying* of frames needed to be there. Frames are now queued from
+the first instant and replayed only after admission, which keeps the security
+property (a refused connection has no frame applied — the queue dies with it) and
+makes the admitted path lossless. Those two requirements are not in tension; I had
+assumed they were and silently traded the second for the first.
+
+### Presence removal was structurally unannouncable
+
+`broadcastAwareness` encoded only the ids currently in `awareness.getStates()`. An
+id that has already been removed cannot be described by the live set, so a
+departure could not be encoded at all — every peer kept drawing a caret for
+someone who had left, forever. `encodeAwarenessUpdate` writes `null` for an id with
+no state and receivers honour a null at an unchanged clock as a removal, so gone
+ids are now recorded *before* the removal that triggers the broadcast.
+
+### Two bugs with one shape: an endpoint that succeeds and then undoes itself
+
+`PUT /draft` and restore-as-draft both write `draft_body`. Phase 3 made `y_state`
+authoritative and made the projections *derived from it*, so both endpoints were
+writing one of two things, the other of which still won: a live room would
+autosave its stale state over the write and re-project `draft_body` from it. And
+restore left `y_state` non-null, so even a document nobody had open would be
+seeded from the pre-restore state on next join — the restore resurrecting itself
+for the next reader. Fixed by nulling `y_state` (putting the document back on the
+seed-from-`draft_body` path) plus `gateway.discard(id)` for the live case.
+
+`discard` deliberately does **not** flush. Flushing is precisely what would
+resurrect the superseded content. In-flight keystrokes from a live editor are
+thrown away, which is the honest outcome: someone restored the document over their
+head, and the alternative is pretending their edit survived.
+
+### And a debounce window lost from an immutable record
+
+Publishing snapshotted `draft_body`, which lags the live room by
+`PERSIST_DEBOUNCE_MS`. So "type, then publish" produced a published version
+missing the last few hundred milliseconds of typing — permanent, because a version
+cannot be amended. `flushNow` runs *before* publish's transaction, never inside
+it: inside, its UPDATE would wait on the `FOR UPDATE` lock the same request is
+holding. The negative control shows the bug in the flesh — the snapshot came back
+containing only `"start"` while the test had just typed `poslední-slova-…`.
+
+### `import type` on an injected constructor parameter
+
+`import type { RealtimeTickets }` erases the runtime binding, so
+`emitDecoratorMetadata` writes `Function` into `design:paramtypes` and Nest
+refuses to build the module. The error ("If Function is a provider, is it part of
+the current RealtimeModule?") is accurate and completely unhelpful. Any class
+injected by Nest must be a value import.
+
+### PermissionService: shared module, not a second instance
+
+The ticket endpoint needs the ACL, and `AppModule.exports` does not make a
+provider visible to a sibling's controller. The fast fix — list
+`PermissionService` in `RealtimeModule`'s own providers — would have created a
+second instance. The class is stateless, so that passes every test while quietly
+ending PLAN §3.1's "the only thing that decides access". Extracted `AclModule`
+instead. `forwardRef` was the other option and I did not take it.
+
+### Two of my own tests were wrong before they ran
+
+The hand-rolled `Peer` had no outbound half: no `ydoc.on('update')` → socket, no
+`awareness.on('update')` → socket. A client that only receives cannot demonstrate
+propagation, so three "propagation" tests were asserting nothing. And the presence
+test waited for the client's self-chosen name `pinger` to reach a peer — the
+server deliberately overwrites `user` from the verified credential, so that test
+was asserting the *vulnerability*. It now asserts `Bora Novák` arrives and
+`pinger` does not.
+
+`wss.close()` invokes its callback only when every connection is gone and does not
+close them itself, so one leaked socket turned shutdown into a 60-second hang that
+pointed at nothing; and an undisposed `Awareness` keeps a 30-second GC interval
+alive, which hung jest after a green run — and verify runs every suite in one
+process. Both fixed rather than papered over with `--forceExit`.
+
+### Negative controls run, all four
+
+Every security assertion in this stretch is one edit away from passing for the
+wrong reason, so each was broken on purpose and watched to fail: the 4403
+read-only check (reader test goes red), the identity overwrite (`Received:
+"pinger"`), the resolve ACL branch (5 tests fail), and `discard`/`flushNow`
+(3 tests fail, one showing the lost keystroke in its own diff output).

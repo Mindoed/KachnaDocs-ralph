@@ -6,6 +6,7 @@ import { RequirePermission } from '../acl/require-permission.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { query, withTransaction } from '../db';
 import { notFound, validationFailed } from '../http-errors';
+import { RealtimeGateway } from '../rt/realtime.gateway';
 
 interface DocumentRow {
   id: string;
@@ -84,7 +85,10 @@ export function slugify(title: string): string {
 @ApiTags('documents')
 @Controller('documents')
 export class DocumentsController {
-  constructor(private readonly permissions: PermissionService) {}
+  constructor(
+    private readonly permissions: PermissionService,
+    private readonly realtime: RealtimeGateway,
+  ) {}
 
   private static dto(row: DocumentRow) {
     return {
@@ -323,7 +327,18 @@ export class DocumentsController {
     return { deleted: true };
   }
 
-  /** Save the working copy. Requires WRITE; leaves every published version alone. */
+  /**
+   * Save the working copy. Requires WRITE; leaves every published version alone.
+   *
+   * Phase 3 replaced this as the editor's save path — the collaborative editor
+   * writes through the websocket, which owns the draft (PLAN §2.3) and derives
+   * `draft_body` and `draft_markdown` from Yjs state on every flush. The endpoint
+   * stays because SPEC.md §2 lists a draft API and a script or import path still
+   * wants to write a document without holding a websocket, which is exactly why it
+   * has to discard the room: a live editor would otherwise autosave its in-memory
+   * state over this write a moment later, and since the projection is re-derived
+   * from that state, the POST would appear to succeed and then undo itself.
+   */
   @Put(':id/draft')
   @RequirePermission('WRITE', 'document')
   async saveDraft(
@@ -335,10 +350,11 @@ export class DocumentsController {
       throw validationFailed({ body: 'body and markdown are required' });
     }
     await query(
-      `UPDATE documents SET draft_body = $2, draft_markdown = $3, draft_updated_at = now()
+      `UPDATE documents SET draft_body = $2, draft_markdown = $3, draft_updated_at = now(), y_state = NULL
         WHERE id = $1`,
       [id, JSON.stringify(body.body), body.markdown],
     );
+    this.realtime.discard(id);
     return { saved: true };
   }
 

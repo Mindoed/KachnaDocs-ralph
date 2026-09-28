@@ -124,6 +124,11 @@ interface Room {
    * an unchanged clock and drops the entry. Cleared once broadcast.
    */
   gone: number[];
+  /**
+   * Set when the room was discarded because its draft was replaced elsewhere.
+   * Suppresses the flush in the release path — see `discard`.
+   */
+  discarded: boolean;
 }
 
 @Injectable()
@@ -182,6 +187,58 @@ export class RealtimeGateway implements OnModuleDestroy {
   /** Rooms held in memory. For the e2e suite's "no leaked rooms" assertion. */
   roomCount(): number {
     return this.rooms.size;
+  }
+
+  /**
+   * Write a document's current live state to the database immediately.
+   *
+   * Publishing calls this. Persistence is debounced, so without it a snapshot
+   * taken the instant someone hits Publish omits whatever they typed in the last
+   * few hundred milliseconds — and a version is immutable once written, so the
+   * lost keystrokes are lost from the published record permanently rather than
+   * until the next autosave. That asymmetry (a cheap debounce on the write path
+   * against an unrecoverable omission on the read path) is the whole reason the
+   * flush is explicit at publish time instead of the debounce being shortened.
+   */
+  async flushNow(documentId: string): Promise<void> {
+    const room = this.rooms.get(documentId);
+    if (!room) return; // nothing in memory means the row is already current
+    if (room.flush) clearTimeout(room.flush);
+    room.flush = null;
+    await this.writeRoom(room);
+  }
+
+  /**
+   * Throw away a document's live room and everything queued for it.
+   *
+   * Called when something outside the websocket replaces the draft — restoring an
+   * older version, or a `PUT /draft`. Plan §2.3 makes `y_state` authoritative, so
+   * an endpoint that rewrites `draft_body` while a room still holds the previous
+   * content has created two versions of the same document: the room's next
+   * autosave would write its stale state over the restore *and* re-project
+   * `draft_body` from it, so the restore would silently undo itself within a
+   * second and the UI would say "restored".
+   *
+   * Deliberately does **not** flush — flushing is what would resurrect the
+   * superseded content, which is the bug. In-flight keystrokes from a live editor
+   * are therefore discarded, and that is the honest outcome: someone restored the
+   * document over their head, and the alternative is pretending their edit
+   * survived. Sockets are terminated so clients reconnect against the new draft
+   * and see that, rather than continuing to edit a document that no longer exists
+   * on the server.
+   */
+  discard(documentId: string): void {
+    const room = this.rooms.get(documentId);
+    if (!room) return;
+    if (room.flush) clearTimeout(room.flush);
+    room.flush = null;
+    // Flagged before terminating, because terminate() fires each socket's close
+    // handler and that handler runs the ordinary release path — which flushes.
+    room.discarded = true;
+    for (const ws of room.sockets) ws.terminate();
+    room.sockets.clear();
+    this.rooms.delete(documentId);
+    this.destroyRoom(room);
   }
 
   /** Connected users for a document — the presence list SPEC.md §2 asks for. */
@@ -257,7 +314,11 @@ export class RealtimeGateway implements OnModuleDestroy {
     conn.on('close', () => {
       gone = true;
       const room = conn.room;
-      if (!room) return;
+      // A discarded room has already had its Y.Doc and Awareness destroyed, so
+      // there is nothing here left to clean up — and touching a destroyed
+      // Awareness would throw from inside an event handler, which in Node is an
+      // uncaught exception rather than a test failure.
+      if (!room || room.discarded) return;
       room.sockets.delete(conn);
       // Only remove presence the socket actually published. A socket that never
       // sent an awareness frame never claimed a client id, and removing an
@@ -423,6 +484,7 @@ export class RealtimeGateway implements OnModuleDestroy {
       dirty,
       flush: null,
       gone: [],
+      discarded: false,
     };
     this.rooms.set(documentId, room);
 
@@ -496,6 +558,12 @@ export class RealtimeGateway implements OnModuleDestroy {
    */
   private async releaseRoom(room: Room): Promise<void> {
     if (room.sockets.size > 0) return;
+    if (room.discarded) {
+      // `discard` already removed this room from the map and destroyed the doc;
+      // the close handlers it triggered land here, and flushing would write the
+      // superseded content straight back over whatever replaced it.
+      return;
+    }
     if (room.flush) {
       clearTimeout(room.flush);
       room.flush = null;
