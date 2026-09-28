@@ -600,3 +600,76 @@ read-only check (reader test goes red), the identity overwrite (`Received:
   nasazení. rozpracováno-autorkou</paragraph>`. The third (4404 on an unpublished
   document) stayed green because it is guarded by `snapshotDoc`, a different line —
   noted rather than glossed, since it means those three tests are not one guard.
+
+## Phase 3, iteration 5 — the phase's two best bugs were both invisible to the tests that were supposed to catch them (2026-09-28)
+
+- **`saved` was stuck false for the life of the process, and only a re-seeded database
+  could show it.** `getOrCreateRoom` seeds a room from `draft_body` when `y_state` IS NULL
+  and sets `dirty = true` on purpose (so the projection beside the newly stored state gets
+  rewritten rather than describing the draft that was there before). Nothing ever
+  scheduled the flush that flag promises: `schedulePersist` had exactly one caller, the
+  ydoc `update` handler, which a document nobody types in never fires. Because
+  `saved: !room.dirty` *is* the autosave indicator, the symptom was "Ukládám…" forever on a
+  document nobody edited. It survived every earlier run because those reused a database
+  whose `y_state` was already populated — the seeding branch was dead — and it appeared the
+  moment `npm run verify` re-seeded, as two Playwright tests failing inside the full gate
+  and passing on their own. *General lesson: a state flag set on a path no test has ever
+  taken is a bug with a fuse as long as the database is stale. "Passes in isolation, fails
+  in the gate" is a fixture-lifetime difference, not flakiness — chase which precondition
+  the gate creates and the isolated run doesn't.*
+- **The test that could see it had to assert while connected.** The last-disconnect
+  release path flushes on its own, so the database row is perfectly current by the time
+  anyone can read it after hanging up. A test written against the row after close is green
+  with the bug present. The assertion is against `GET /realtime-status` during the
+  session, which is also the only thing the user can see.
+- **A control arm that can't answer is as useless as no control arm.** The
+  READ-refusal test's writer-side check waited for a socket close that an *accepted* frame
+  never produces; it hung for 30 s and reported "Target page, context or browser has been
+  closed", which reads like a browser crash and was a helper that had no representation for
+  success. "Was I refused?" needs three answers, not two: close code, refused-later, and
+  *still open after a second* — the last of those is the pass condition for the writer.
+- **…and a control arm must differ in exactly one thing.** The first version sent
+  `[sync, update]` with a garbage payload. The gateway refuses a read-only update *before*
+  decoding, so the reader was refused for the ACL while the writer's frame died on a decode
+  error inside y-protocols' own catch (visible as `Caught error while handling a Yjs
+  update`). Both arms "passed", neither proved the ACL. The frame is now a well-formed
+  no-op update — `0, 2, 2, 0, 0`, i.e. `Y.encodeStateAsUpdate(new Y.Doc())` — which a writer
+  applies as a genuine no-op. Proven both ways by negating the gateway's check in each
+  direction: with the gate removed the reader's assertion fails (got 1000, expected 4403),
+  with the gate always on the writer's fails (not 4403). `page.evaluate` serialises only the
+  function body, so a module-scope constant arrives in the browser as `undefined` and the
+  send silently throws — that is why the byte string is inline.
+- **`admit()` prints `[Object: ...]` in the server log** for every READ connection,
+  because a `Y.Doc` was interpolated into a template string in the diagnostic path. Cosmetic
+  and not worth a commit on its own, but it is precisely the log line that would be needed
+  to debug a reader problem, and it prints nothing useful.
+- **A page can be told about a document it may not read.** `Workbench.vue`'s
+  `selectionWatcher` assigned `cms.selectedId = id` *before* checking
+  `cms.visibleSelected`, and its recovery branch ran only when `selected` was null. A URL
+  pointing at an inaccessible document therefore left the notice showing, the right dock
+  hidden, and **no document selected** — which also made every later reload land on an
+  arbitrary document. Reached by the deep-link tests; it had nothing to do with anchors.
+- **The cross-document reference dialog's placeholder promised an id and the resolver
+  answered slugs.** `references.ts` zipped results by `token(documentId, anchor)` while the
+  view asked with `token(slug, anchor)`, so every reference sat at
+  `data-resolved="loading"` forever. The resolver answers under whichever name it was given,
+  so the index now holds both keys when a slug exists — the same both-names rule the
+  endpoint already implements, which the client had silently not matched.
+- **Presence is per-connection, not per-person.** `peers` deduplicated by `user.id`, so two
+  browsers owned by the same person rendered as one collaborator and the count assertion was
+  wrong in the interesting direction (too few looks fine). Readers were additionally
+  invisible to themselves, because `publishSelf` was skipped when `canWrite` was false and
+  their payload hardcoded `canWrite: true` regardless.
+- **The two Playwright files cannot both own the runbook.** `workbench.spec.ts` asserts
+  exactly 3 diff lines and exactly 1 version on that document; `realtime.spec.ts` types in it
+  and publishes it. `fullyParallel: false` stops tests *within* a file overlapping, but
+  Playwright still runs the two files on separate workers against one shared server and one
+  shared database. Observed both directions: presence chips 4 instead of 2 (workbench's
+  editor joined the room), and the runbook diff 4 lines instead of 3. *Two suites sharing a
+  seeded row is not flakiness to be waited out — each suite needs a row it owns.* The fix
+  adds a fixture document reserved for the realtime specs rather than relaxing an assertion;
+  the counts that describe "what the seed contains" move with the seed, deliberately.
+- **`grep` inside an `&&` chain silently skipped a Playwright run.** A backslash-escaped
+  pattern made grep exit non-zero, the chain short-circuited, and the run I believed I had
+  made never started. Same class as the python-`replace` incident in the previous entry: the
+  command that reports nothing did not do what was assumed.
