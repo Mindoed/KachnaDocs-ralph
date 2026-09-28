@@ -804,3 +804,25 @@ end ("NONE is reachable in the grant editor and renders as a denial"). The DEFER
 stale-but-true-as-written (it describes phase 1's state and points the fix at phase 2, where it
 landed). Left in place rather than edited, per the append-only rule; noted here so nobody reads the
 absence of `NONE` in the UI as still-open work.
+
+### Correction to the entry above, and the phase-2 promise
+
+That entry says the phase-5 stash "is restored after the measurement, so the WIP is not stranded in it".
+It is stranded, deliberately, and this says so instead of leaving the file describing a tree that does
+not exist: the suite was re-parked (`git stash list` → `phase5 WIP (UNVERIFIED): …`) after the
+measurement, because the alternative was handing back a tree containing ~800 lines of unrun tests plus a
+behaviour-config change. Those break the gate (unresolvable imports), so leaving them in place would have
+made "verify exits 0" false of the very state the promise describes.
+
+**The gate, on the tree this promise is emitted from:** exit **0** — 23 unit + 143 backend e2e + 22
+Playwright, read from the log as `VERIFY_EXIT=0`. Phase 2's five required tests were then confirmed to
+exist and to assert the property rather than a side effect of it: publish immutability
+(`cms-versions.e2e-spec.ts:169`, "immutable through every path"), the reader/writer draft split
+(`:202`, including the seeded fixture), diff + restore-as-draft round-trip (`:244`, `:186`), forbidden vs
+nonexistent indistinguishability (`acl.e2e-spec.ts:101`), and subtree reparent with inheritance
+re-resolved (`cms-crud.e2e-spec.ts:354`, plus `:307` where moving a document *out* revokes access).
+
+**Restoring the phase-5 work is the next action, not a lost one:** `git stash pop` brings back
+`backend/test/ai.e2e-spec.ts` and the lazy-`path` change to `behavior-config.service.ts`. Neither is
+verified; the green above says nothing about either. `ralph/prompts/phase5-ai.md` remains unfinished —
+its six required tests are exactly what that stashed file attempts, unrun.
