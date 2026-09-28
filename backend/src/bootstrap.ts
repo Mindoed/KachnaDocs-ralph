@@ -6,6 +6,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { AuthService, bindIdentityProvider } from './auth/auth.service';
 import { pickIdentityProvider } from './auth/auth.controller';
+import { RealtimeGateway } from './rt/realtime.gateway';
 import { readEnv } from './env';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
@@ -28,6 +29,18 @@ export async function createApp() {
 
   const auth = app.get(AuthService);
   bindIdentityProvider(auth, pickIdentityProvider());
+
+  // The websocket gateway rides the same port as the API, so it is wired here
+  // rather than in `bootstrap()`: `helpers.ts` calls createApp() and listens on
+  // port 0 itself, and a gateway attached in bootstrap() would silently not exist
+  // for the entire jest e2e suite — every realtime test would fail against a
+  // server that has no realtime, which reads as a broken gateway rather than a
+  // missing line of wiring.
+  //
+  // Safe before listen() because Nest creates the http.Server once, during
+  // create() (express-adapter's initHttpServer), and listen() calls .listen on
+  // that same instance — so a listener registered now still sees upgrades later.
+  app.get(RealtimeGateway).attach(app.getHttpServer());
 
   return { app, env };
 }

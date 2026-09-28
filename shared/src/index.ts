@@ -160,6 +160,76 @@ export interface DiffDto {
   lines: DiffLineDto[];
 }
 
+/**
+ * The y-websocket sub-protocol message ids, in one place instead of two.
+ *
+ * These are fixed by y-websocket and y-protocols (not ours to choose), but the
+ * gateway and the browser client both branch on them, and a value that drifted
+ * between the two would misframe every message — a symptom that reads as a
+ * networking failure rather than an off-by-one. Naming them here is the only
+ * reason they appear twice in the tree.
+ */
+export const RT_MESSAGE = { sync: 0, awareness: 1, auth: 2, queryAwareness: 3 } as const;
+/** Sub-types inside an RT_MESSAGE.sync frame, per y-protocols/sync. */
+export const RT_SYNC = { step1: 0, step2: 1, update: 2 } as const;
+
+/** Y.XmlFragment name the Tiptap Collaboration extension binds the draft to. */
+export const RT_FRAGMENT = 'prosemirror';
+
+/**
+ * Who the websocket announces to other collaborators.
+ *
+ * Deliberately a fixed, narrow shape rather than `AuthUser`: this is placed on a
+ * public awareness record and broadcast to everyone joined to the document, so
+ * whatever is added here is disclosed to every reader of that document. `avatarUrl`
+ * is left out for exactly that reason — a Discord avatar URL is not something a
+ * document reader needs in order to see a caret, and awareness has no ACL of its
+ * own once a client holds the ticket.
+ */
+export interface AwarenessUser {
+  id: string;
+  displayName: string;
+  /** Stable per session; drives the remote cursor colour. */
+  color: string;
+  /** Whether this connection may write. `READ` joins are read-only (SPEC.md §2). */
+  canWrite: boolean;
+}
+
+/** Body of `POST /documents/:id/realtime-token`. */
+export interface RealtimeTicketDto {
+  /** Single-purpose, short-lived credential the websocket presents as a query param. */
+  ticket: string;
+  /** websocket path, including the document the ticket is valid for. */
+  url: string;
+  documentId: string;
+  /** What the server will enforce for this connection, not what the client guessed. */
+  permission: Extract<Permission, 'READ' | 'WRITE'>;
+  expiresInSeconds: number;
+}
+
+/**
+ * A heading resolved from another document, for the live reference node
+ * (ralph/PLAN.md §2.5). Resolved at read time against the target's newest
+ * published version — never a copy of the target's text.
+ */
+export interface ResolvedHeadingDto {
+  target: 'ok' | 'inaccessible';
+  documentId: string;
+  slug: string | null;
+  title: string | null;
+  anchor: string;
+  level: number | null;
+  /** Current published heading text. Null and withheld when `target` is `inaccessible`. */
+  text: string | null;
+  /** Version the text came from, so a reader can tell that it moved. */
+  version: number | null;
+}
+
+/** Query result of `GET /headings/resolve`. */
+export interface ResolveHeadingsDto {
+  headings: ResolvedHeadingDto[];
+}
+
 export interface AuthUser {
   id: string;
   /** Discord snowflake as string, or a synthetic `dev-*` id for the dev provider. */

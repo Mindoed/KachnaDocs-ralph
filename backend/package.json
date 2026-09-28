@@ -21,9 +21,14 @@
     "@nestjs/swagger": "^7.4.2",
     "dotenv": "^16.4.5",
     "express": "^4.22.3",
+    "lib0": "^0.2.118",
     "pg": "^8.12.0",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "ws": "^8.22.0",
+    "y-protocols": "^1.0.7",
+    "y-websocket": "^3.1.0",
+    "yjs": "^13.6.33"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
@@ -31,6 +36,7 @@
     "@types/node": "^22.5.0",
     "@types/pg": "^8.11.6",
     "@types/supertest": "^6.0.2",
+    "@types/ws": "^8.18.1",
     "jest": "^29.7.0",
     "node-pg-migrate": "^7.6.1",
     "supertest": "^7.0.0",
