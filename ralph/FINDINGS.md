@@ -512,3 +512,91 @@ wrong reason, so each was broken on purpose and watched to fail: the 4403
 read-only check (reader test goes red), the identity overwrite (`Received:
 "pinger"`), the resolve ACL branch (5 tests fail), and `discard`/`flushNow`
 (3 tests fail, one showing the lost keystroke in its own diff output).
+
+### Phase 3, third window — the editor client, and the leak its arrival exposed
+
+- **A `READ` websocket was answering sync step 1 from the room, i.e. from the
+  draft.** Three tests in `realtime.e2e-spec.ts` assert published content and they
+  all failed when written. Nothing was bypassed — a reader holds `READ`, the ticket
+  minted, the 4403 refusal worked, the ACL was consulted correctly and completely —
+  and that is exactly why no existing test went red: the leak is one permission level
+  *narrower* than the check that guarded it. `acl.e2e-spec.ts` asks "may they read
+  this document"; the question that had gone unasked since the gateway was written is
+  "which *version* of it may they read". SPEC.md §1 answers it ("běžný čtenář vidí
+  pouze publikovanou verzi") and SPEC.md §3 names the websocket as a transport that
+  must respect that. The HTTP layer had been refusing a reader `?ref=draft` with a
+  404 all along, so the realtime channel was quietly more generous than the API it
+  sits beside.
+  **The general shape:** when a permission check gates *access to an object* and the
+  object has graded contents, the check passes and the disclosure still happens.
+  A capability test cannot see this class at all; only a test phrased against the
+  content itself can. If a phase ever adds a second transport for something already
+  served over a first, ask which *field* of the answer the first transport filtered
+  and whether the second filters it too.
+- **Fixed by serving a per-connection snapshot document, not by filtering frames.** A
+  reader's `conn.view` is a `Y.Doc` seeded from the newest published version;
+  `readSyncMessage` and the handshake's step 1 both target `conn.view ?? room.ydoc`,
+  and the room's update fan-out skips any socket with a `view`. The absence of
+  `view` *is* the capability check on the hot path, so no branch has to re-derive
+  `perm` and a new message type cannot be served from the wrong doc by accident.
+  The trade-off is real and deliberate: **a reader no longer sees a writer's unsaved
+  keystrokes** — they see the newest published version and learn of a new one by
+  reconnecting. SPEC.md §2's "změna se provedená jedním uživatelem zobrazí ostatním"
+  is about collaborators, and phase 3's acceptance tests pair writers. If product
+  later wants live draft preview for readers, it needs a *draft* grant distinct from
+  `WRITE`, not a relaxation here.
+- **The first attempt at the "unpublished document" test hung for 60 seconds**
+  because it asked Bona to connect as a reader to her own draft-only document —
+  where she holds WRITE, so her ticket was a WRITE ticket, which joined the room and
+  stayed open. The test would have passed for the wrong reason if the assertion had
+  been about content rather than a close code. Now the test asserts
+  `permission === 'READ'` on the mint before it connects: a test named "refuses a
+  reader" must prove it is holding a reader's credential.
+- **I wrote a comment asserting the opposite of the truth about `lib0`'s
+  `ObservableV2`** — that it camelCases dash event names, so `connectionError` was
+  the name that fires. It does no such thing: `emit` is
+  `_observers.get(name)` with no mangling, so the correct name is `connection-error`
+  and my code would have registered a listener nothing ever called. TypeScript
+  rejected the string against the provider's event union, which is the only reason
+  this did not ship as a silently dead error handler. The lesson is not "trust the
+  compiler" — it is that a confident comment about a library's internals is the most
+  dangerous kind of unverified claim, because the next reader stops checking. Both
+  the comment and the code were wrong together, and they would have agreed with each
+  other forever.
+- **A scripted edit deleted a `const` declaration and left a dangling arrow
+  function.** `Workbench.vue` lost `const roleNames = computed` to a `str.replace`
+  whose anchor overlapped the line below it; the file still parsed. `vue-tsc` caught
+  it. Editing by script is fine; editing by script *without reading the result* is
+  how a green-looking change breaks the build.
+- **The ticket-rotation timer exists because Tiptap 3 declares `tokenRefresh` and
+  never calls it.** `@tiptap/extension-collaboration` accepts the option, defaults it
+  to a no-op, and has no call site — a holdover from the y-prosemirror era. The
+  option is therefore not passed rather than passed-and-ignored: a configured-but-dead
+  security feature is worse than an absent one, because the next reader trusts it.
+- **`disableBc: true` is load-bearing for the acceptance test's value.** y-websocket
+  syncs two tabs through `BroadcastChannel` by default, which would let "user A
+  types, user B sees it without reloading" pass against a server that isn't running.
+  With it off, every update a user sees has come from the gateway.
+- **`field: RT_FRAGMENT` is imported from `shared`, never restated.** The backend
+  projects `getXmlFragment(RT_FRAGMENT)` into `draft_body`; bind to another name and
+  nothing throws — the browser edits an empty fragment, autosave says "Uloženo", the
+  database never changes.
+- **The save indicator polls `GET /documents/:id/realtime-status`.** `Uloženo` is a
+  claim about a row, and the client cannot observe one: only the process holding the
+  room knows that its debounce has elapsed or that a projection threw. The optimistic
+  version (spinner for a second, then "Uloženo") hides exactly the failure that
+  matters — a projection error leaves Yjs intact but the Markdown stale, and the UI
+  would have said "Uloženo" through all of it.
+- **Remote carets read `user.displayName`, not the plugin's `user.name`.** The server
+  overwrites the outbound `user` record with `AwarenessUser`, whose field is
+  `displayName`; `yCursorPlugin`'s default builder reads `name` and falls back to
+  `User: 41932` when absent. A builder written against the library's convention would
+  print Yjs client numbers instead of colleagues' names, on every caret, silently —
+  the fallback is deliberate, so nothing warns.
+- **Negative control run.** Restoring the leak (`conn.view ?? room.ydoc` →
+  `room.ydoc`, drop the fan-out skip) turned 2 of the 3 new tests red, and their
+  failure output printed the draft text inside the reader's document:
+  `Expected substring: not "rozpracováno-autorkou" / Received: …<paragraph>Kroky
+  nasazení. rozpracováno-autorkou</paragraph>`. The third (4404 on an unpublished
+  document) stayed green because it is guarded by `snapshotDoc`, a different line —
+  noted rather than glossed, since it means those three tests are not one guard.
