@@ -46,7 +46,7 @@ export const VIEWS: ViewDescriptor[] = [
     preferredDock: 'right',
     available: true,
   },
-  { id: 'editor', title: 'Editor', icon: '✎', preferredDock: 'main', available: false },
+  { id: 'editor', title: 'Editor', icon: '✎', preferredDock: 'main', available: true },
   { id: 'permissions', title: 'Oprávnění', icon: '🔐', preferredDock: 'right', available: true },
   { id: 'tasks', title: 'Úkoly', icon: '☑', preferredDock: 'right', available: false },
   { id: 'chat', title: 'AI chat', icon: '✦', preferredDock: 'right', available: false },

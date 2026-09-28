@@ -195,6 +195,21 @@ export interface AwarenessUser {
   canWrite: boolean;
 }
 
+/**
+ * Body of `GET /documents/:id/realtime-status` — the autosave indicator's source.
+ *
+ * `saved` is the server's own persistence flag, not the client's quiet period:
+ * "Uloženo" is a claim about a database row, and only the process holding the row
+ * can make it. See `RealtimeGateway.persistence`.
+ */
+export interface RealtimeStatusDto {
+  documentId: string;
+  /** False while an update is queued or being projected. */
+  saved: boolean;
+  /** Live connections; 0 means nobody else is in the room. */
+  peers: number;
+}
+
 /** Body of `POST /documents/:id/realtime-token`. */
 export interface RealtimeTicketDto {
   /** Single-purpose, short-lived credential the websocket presents as a query param. */
@@ -228,6 +243,54 @@ export interface ResolvedHeadingDto {
 /** Query result of `GET /headings/resolve`. */
 export interface ResolveHeadingsDto {
   headings: ResolvedHeadingDto[];
+}
+
+/**
+ * The alphabet for generated heading anchors (PLAN §2.4).
+ *
+ * URL- and CSS-safe, and deliberately missing the characters people confuse when
+ * reading an anchor aloud or typing it from a screen: no `0`/`O`, no `1`/`l`/`i`.
+ * An anchor is a permanent part of a published URL, so it is read back over a
+ * chat message more often than it is typed.
+ */
+const ANCHOR_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+
+/** 8 characters of a 31-symbol alphabet: ~8.5e11 values, and short enough to read. */
+const ANCHOR_LENGTH = 8;
+
+/**
+ * A new heading anchor: `h-` plus a random token, never derived from the text.
+ *
+ * Lives here rather than in the editor because PLAN §2.4 makes an anchor assigned
+ * once at node creation and then permanent. A document seeded straight into the
+ * database, or imported by a script, needs the same shape as one the editor
+ * created — and if the two generators differed, an imported heading would still
+ * *work* right up until someone edited it in the browser, which is a bug that
+ * surfaces months later as anchors that change shape down the document.
+ *
+ * The `h-` prefix also keeps a generated anchor from ever colliding with a
+ * hand-written one, and keeps the ordinal anchors the publish path falls back to
+ * (`h-1`, `h-2`) distinguishable in shape from real ones.
+ *
+ * Randomness comes from whichever source this environment has. It is not a
+ * security boundary — an anchor is a public label, not a secret, and guessing one
+ * grants nothing that READ would not — so falling back to `Math.random` in an
+ * environment without `crypto` costs unguessability and nothing else. What matters
+ * is that two headings created in the same millisecond differ.
+ */
+export function newHeadingAnchor(): string {
+  const bytes = new Uint8Array(ANCHOR_LENGTH);
+  const crypto = (globalThis as { crypto?: { getRandomValues?: (b: Uint8Array) => unknown } }).crypto;
+  if (crypto?.getRandomValues) crypto.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+
+  let out = 'h-';
+  for (let i = 0; i < ANCHOR_LENGTH; i += 1) {
+    // Modulo the alphabet size rather than masking bits: 31 is not a power of two,
+    // and masking would make some letters appear more often than others.
+    out += ANCHOR_ALPHABET[(bytes[i] ?? 0) % ANCHOR_ALPHABET.length];
+  }
+  return out;
 }
 
 export interface AuthUser {

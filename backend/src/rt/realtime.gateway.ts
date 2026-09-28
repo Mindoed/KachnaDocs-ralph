@@ -103,6 +103,16 @@ interface Socket extends WebSocket {
   alive?: boolean;
   /** Set once admitted, so the close handler knows whether there is presence to remove. */
   room?: Room;
+  /**
+   * The document this socket is shown, when that is not the room's.
+   *
+   * Set for `READ` connections only: their content comes from a published snapshot
+   * built for them alone, so it must be destroyed with them and must never be the
+   * target of a room update. A `WRITE` connection leaves this undefined and syncs
+   * against `room.ydoc` — the absence is the capability check, which is why
+   * `onMessage` reads `conn.view ?? room.ydoc` rather than asking the claim again.
+   */
+  view?: Y.Doc;
 }
 
 interface Room {
@@ -206,6 +216,28 @@ export class RealtimeGateway implements OnModuleDestroy {
     if (room.flush) clearTimeout(room.flush);
     room.flush = null;
     await this.writeRoom(room);
+  }
+
+  /**
+   * What the autosave indicator is allowed to claim.
+   *
+   * `Ukládání… / Uloženo` is a promise about the database, so the only honest
+   * source for it is the thing that writes the database. The client knows it sent
+   * an update; it cannot know that the update landed, that the debounce has
+   * elapsed, or that the projection didn't just throw and leave `dirty` set for a
+   * retry. Answering "uloženo" from the client's own quiet period would be a label
+   * derived from optimism — and the failure it would hide is the expensive one: a
+   * projection error loses nobody's data (Yjs still holds it) but does mean the
+   * Markdown every later read uses is stale, and the UI would have said "Uloženo"
+   * through the whole of it.
+   *
+   * `saved: true` with no room is not a guess: a document with no room in memory
+   * has nothing unsaved, because the release path flushes before dropping a room.
+   */
+  persistence(documentId: string): { saved: boolean; peers: number } {
+    const room = this.rooms.get(documentId);
+    if (!room) return { saved: true, peers: 0 };
+    return { saved: !room.dirty, peers: room.sockets.size };
   }
 
   /**
@@ -323,6 +355,10 @@ export class RealtimeGateway implements OnModuleDestroy {
       // Only remove presence the socket actually published. A socket that never
       // sent an awareness frame never claimed a client id, and removing an
       // arbitrary id would delete somebody else's entry.
+      // A reader's snapshot doc belongs to this connection and nothing else, so it
+      // goes now; leaving it would leak a whole parsed document per connection.
+      conn.view?.destroy();
+      conn.view = undefined;
       if (conn.clientId !== undefined) {
         const leaving = conn.clientId;
         conn.clientId = undefined;
@@ -357,7 +393,7 @@ export class RealtimeGateway implements OnModuleDestroy {
       // window are its *request* for state, and answering them is the point.
       this.send(conn, (enc) => {
         encoding.writeVarUint(enc, RT_MESSAGE.sync);
-        writeSyncStep1(enc, room.ydoc);
+        writeSyncStep1(enc, conn.view ?? room.ydoc);
       });
       this.sendAwarenessTo(conn, room);
       for (const buf of queued.splice(0, queued.length)) this.onMessage(room, conn, buf);
@@ -380,6 +416,11 @@ export class RealtimeGateway implements OnModuleDestroy {
    * never joined, so nothing else would ever clean it up. That is not only memory:
    * a room held open keeps its document's live state out of the database, which is
    * the exact staleness `releaseRoom` exists to prevent.
+   *
+   * The `READ` branch returns a room for *presence* bookkeeping while attaching the
+   * socket to a different document for content, so the invariant to hold when
+   * reading this is that two things are per-connection (the snapshot doc, and the
+   * claims that select it) and two are per-document (the room, and its awareness).
    */
   private async admit(conn: Socket, documentId: string, req: IncomingMessage): Promise<Room | null> {
     const ticket = readTicket(req);
@@ -387,6 +428,49 @@ export class RealtimeGateway implements OnModuleDestroy {
     if (!claim || claim.rt !== documentId) {
       conn.close(CLOSE.unauthorized, 'unauthorized');
       return null;
+    }
+
+    // The split decided here, and it decides what bytes leave the process.
+    //
+    // A WRITE connection joins the room: the shared, live, unsaved Y.Doc.
+    //
+    // A READ connection is served a throwaway document built from the newest
+    // *published* version, and never sees the room's Y.Doc at all. Before this, a
+    // reader's sync step 1 was answered from the room — so a READ ticket received
+    // the draft, keystrokes and all. Nothing in the ACL was bypassed (they hold
+    // READ), but SPEC.md §1's "běžný čtenář vidí pouze publikovanou verzi" is not a
+    // note about which endpoint to call; it is a statement about which bytes a
+    // reader may obtain, and SPEC.md §3's list of transports the ACL must cover
+    // names the websocket explicitly. The HTTP layer already refuses a reader
+    // `?ref=draft` with a 404, so leaving the socket more generous than the API
+    // made the realtime channel the way to read someone's unfinished draft.
+    //
+    // A snapshot document is the whole fix, and it needs no protocol change: the
+    // reader's provider syncs against a doc that contains published content, gets
+    // updates from writers (which is what "změna se zobrazí ostatním" means for a
+    // reader — of a *published* document they may read), and simply cannot ask for
+    // state that was never put in it. See `serveSnapshot` for the trade-off this
+    // makes, which is real: a reader no longer sees a writer's unsaved keystrokes.
+    if (claim.perm !== 'WRITE') {
+      const snapshot = await this.snapshotDoc(documentId, claim.sub);
+      if (!snapshot) {
+        conn.close(CLOSE.notFound, 'not found');
+        return null;
+      }
+      // Presence comes from the room, so a reader still sees who is editing: the
+      // list discloses nothing the ticket did not already grant, and SPEC.md §2 asks
+      // for it by name. Content does not.
+      const room = await this.loadRoom(documentId);
+      if (!room) {
+        snapshot.destroy();
+        conn.close(CLOSE.notFound, 'not found');
+        return null;
+      }
+      conn.claims = claim;
+      conn.view = snapshot;
+      conn.room = room;
+      room.sockets.add(conn);
+      return room;
     }
 
     const room = await this.loadRoom(documentId);
@@ -422,6 +506,46 @@ export class RealtimeGateway implements OnModuleDestroy {
   }
 
   // --------------------------------------------------------------------- rooms
+
+  /**
+   * A reader's document: the newest published version, in a Y.Doc of its own.
+   *
+   * Built per connection and never shared, which is the opposite of the room's
+   * design and correct for both. The room is shared because writers must converge on
+   * one CRDT history; a reader has no history to contribute, and sharing one
+   * snapshot document between two readers would mean their (impossible, but
+   * defense-in-depth is cheap here) writes merge into each other's view.
+   *
+   * A document that has never been published gets an empty fragment rather than the
+   * draft. "You may read this document" and "you may read this document's unfinished
+   * draft" are different grants, and the one this connection holds is the first; a
+   * reader seeing an empty document they are told exists is a content lifecycle
+   * question, and a reader silently handed the draft would be a security one.
+   *
+   * The `v.number = (SELECT max(number) …)` shape is the same one
+   * `documents.controller.ts` uses for `?ref=published`, deliberately: two ways to
+   * name "the newest published version" is two ways to disagree about which version a
+   * reader is looking at. There is no ACL predicate here because there is no actor
+   * left to ask — the READ check that produced this ticket already happened in the
+   * minting route, and this query cannot widen what that decided.
+   */
+  private async snapshotDoc(documentId: string, userId: string): Promise<Y.Doc | null> {
+    const rows = await query<{ body: unknown }>(
+      `SELECT v.body
+         FROM document_versions v
+         JOIN documents d ON d.id = v.document_id
+        WHERE v.document_id = $1
+          AND v.number = (SELECT max(number) FROM document_versions WHERE document_id = $1)
+          AND can_access_document($2, d.id, 'READ')`,
+      [documentId, userId],
+    );
+    const row = rows[0];
+    // No readable published version. The caller answers 4404, which is the same
+    // close a nonexistent document gets: "not published yet" and "not yours" stay
+    // indistinguishable on the wire (PLAN §3.3).
+    if (!row) return null;
+    return seedYDocFromPmJson(row.body ?? { type: 'doc', content: [] });
+  }
 
   /**
    * Load or create the shared document, seeding from `draft_body` at most once.
@@ -495,6 +619,14 @@ export class RealtimeGateway implements OnModuleDestroy {
       // already had, and make typing feel like network lag.
       for (const ws of room.sockets) {
         if (ws === origin) continue;
+        // Readers are skipped, and this line is the one that keeps SPEC.md §1 true
+        // while anyone is typing. A writer's update is the *draft's* delta: forwarding
+        // it would deliver unsaved text into a reader's document one keystroke at a
+        // time, which is precisely what their ticket does not authorise — and doing it
+        // via a peer update rather than a sync step 2 would make it look like ordinary
+        // collaboration on every wire capture from here on. A reader sees the newest
+        // published version and learns about a new one by reconnecting.
+        if (ws.view) continue;
         this.send(ws, (enc) => {
           encoding.writeVarUint(enc, RT_MESSAGE.sync);
           encoding.writeVarUint(enc, messageYjsUpdate);
@@ -633,7 +765,10 @@ export class RealtimeGateway implements OnModuleDestroy {
         encoding.writeVarUint(encoder, RT_MESSAGE.sync);
         let applied: 0 | 1 | 2;
         try {
-          applied = readSyncMessage(decoder, encoder, room.ydoc, conn);
+          // A reader's frames are answered out of their own snapshot, a writer's out of
+          // the shared room. Resolved here rather than at each branch below, so that a
+          // message type added later cannot accidentally be served from the wrong doc.
+          applied = readSyncMessage(decoder, encoder, conn.view ?? room.ydoc, conn);
         } catch {
           conn.close(CLOSE.badFrame, 'bad frame');
           return;

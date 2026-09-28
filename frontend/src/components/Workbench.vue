@@ -2,10 +2,18 @@
 import { computed } from 'vue';
 import { DOCKS, useLayoutStore, type Dock } from '../stores/layout';
 import { useAuthStore } from '../stores/auth';
+import { useCmsStore } from '../stores/cms';
 import PanelHost from './PanelHost.vue';
+import { followSelection } from '../editor/deepLink';
 
 const layout = useLayoutStore();
 const auth = useAuthStore();
+const cms = useCmsStore();
+
+// The URL follows the tree selection; the editor panel does the opposite (it selects
+// in the store when the URL names a document). Each side no-ops when the other has
+// already caught up, so the two watchers settle instead of looping.
+followSelection(computed(() => cms.selectedId));
 
 const roleNames = computed(() => (auth.user?.roles ?? []).map((r) => r.name).join(', ') || '—');
 

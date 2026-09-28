@@ -4,6 +4,7 @@ import type { ViewDescriptor } from '../stores/layout';
 import CmsTreePanel from './CmsTreePanel.vue';
 import PermissionsPanel from './PermissionsPanel.vue';
 import VersionHistoryPanel from './VersionHistoryPanel.vue';
+import EditorPanel from './EditorPanel.vue';
 
 const props = defineProps<{ view: ViewDescriptor }>();
 
@@ -15,6 +16,7 @@ const PANELS: Record<string, Component> = {
   cms: CmsTreePanel,
   versions: VersionHistoryPanel,
   permissions: PermissionsPanel,
+  editor: EditorPanel,
 };
 
 const panel = computed(() => PANELS[props.view.id] ?? null);

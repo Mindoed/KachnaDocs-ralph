@@ -1,9 +1,10 @@
-import { Controller, Param, Post } from '@nestjs/common';
+import { Controller, Get, Param, Post } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import type { AuthUser, RealtimeTicketDto } from '@kachnadocs/shared';
+import type { AuthUser, RealtimeStatusDto, RealtimeTicketDto } from '@kachnadocs/shared';
 import { PermissionService } from '../acl/permission.service';
 import { RequirePermission } from '../acl/require-permission.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
+import { RealtimeGateway } from './realtime.gateway';
 import { RealtimeTickets } from './realtime-tickets';
 
 /**
@@ -30,7 +31,31 @@ export class RealtimeTokensController {
   constructor(
     private readonly permissions: PermissionService,
     private readonly tickets: RealtimeTickets,
+    // A value import, not `import type`: emitDecoratorMetadata needs the runtime
+    // binding in design:paramtypes or Nest cannot resolve it.
+    private readonly realtime: RealtimeGateway,
   ) {}
+
+  /**
+   * Server-side truth behind the editor's `Ukládání… / Uloženo` indicator.
+   *
+   * A tiny read, deliberately not folded into the ticket response: the editor
+   * polls it while it is open, whereas a ticket is minted once a minute, and an
+   * indicator that updates once a minute is a decoration. It is also a separate
+   * request so that polling it cannot rotate a credential nobody asked to rotate.
+   *
+   * READ rather than WRITE because a reader sees the same indicator state as a
+   * writer (they simply never see "Ukládání…", having nothing to save), and the
+   * body discloses nothing beyond the fact that they may read the document:
+   * `saved` is a boolean about a row they can already see, and `peers` is a count,
+   * not a list — the presence *names* come over the websocket, which has its own
+   * admission check.
+   */
+  @Get(':id/realtime-status')
+  @RequirePermission('READ', 'document')
+  status(@Param('id') id: string): RealtimeStatusDto {
+    return { documentId: id, ...this.realtime.persistence(id) };
+  }
 
   @Post(':id/realtime-token')
   @RequirePermission('READ', 'document')

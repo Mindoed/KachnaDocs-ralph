@@ -16,6 +16,7 @@ import {
   resetDatabase,
   startServer,
   stopServer,
+  user,
   apiOrigin,
 } from './helpers';
 
@@ -391,6 +392,148 @@ describe('the WRITE enforcement is server-side', () => {
     expect(peer.frames.length).toBeGreaterThan(0);
     peer.socket.close();
     await peer.closed;
+  });
+});
+
+// ------------------------------------------------- what a reader is allowed to see
+
+/**
+ * SPEC.md §1: "Běžný čtenář vidí pouze publikovanou verzi."
+ *
+ * These are the tests for the sentence as applied to the websocket, and they exist
+ * because the gateway once failed all three of them while passing every other test
+ * in this file. A `READ` ticket minted cleanly, opened a socket, was refused writes
+ * with 4403, and answered its sync step 1 from the *room* — which holds the draft.
+ * Nothing in the ACL was bypassed (a reader holds READ), so no capability test went
+ * red; the leak was one permission level narrower than the check that guarded it,
+ * which is the class of bug a permission test cannot see.
+ *
+ * The fixture is Bona's runbook, where she holds WRITE+MANAGE and can therefore
+ * grant Carl — who has a direct READ grant and nothing else — a look at a draft she
+ * is still writing. That pairing is the point: both parties are acting entirely
+ * within their permissions, and the only thing that decides whether Carl sees
+ * unfinished text is what this file is about.
+ */
+describe('a READ connection sees the published version, never the draft', () => {
+  const DRAFT_MARKER = 'rozpracováno-autorkou';
+  const PUBLISHED_MARKER = 'Kroky nasazení.';
+
+  /** The runbook's published v1 and its draft, with the draft moved apart from it. */
+  async function separateDraftFromPublished(): Promise<void> {
+    const [row] = await query<{ draft_body: unknown }>('SELECT draft_body FROM documents WHERE id = $1', [
+      RUNBOOK,
+    ]);
+    const body = JSON.stringify(row?.draft_body ?? { type: 'doc', content: [] }).replace(
+      'Kroky nasazení.',
+      `Kroky nasazení. ${DRAFT_MARKER}`,
+    );
+    await query('UPDATE documents SET draft_body = $2, draft_markdown = $3 WHERE id = $1', [
+      RUNBOOK,
+      JSON.parse(body),
+      `# Obsah\n\nKroky nasazení. ${DRAFT_MARKER}`,
+    ]);
+  }
+
+  /** Everything the server sent into one reader's document, as text. */
+  function receivedText(peer: Peer): string {
+    return peer.ydoc.getXmlFragment(RT_FRAGMENT).toString();
+  }
+
+  beforeAll(async () => {
+    await separateDraftFromPublished();
+  });
+
+  it('answers a reader with the published body, and not with the draft', async () => {
+    const carl = await loginAs('carl');
+    const peer = await connect(RUNBOOK, await mintToken(RUNBOOK, carl));
+
+    await waitFor(() => receivedText(peer).includes(PUBLISHED_MARKER), 'the published body to arrive');
+    expect(receivedText(peer)).not.toContain(DRAFT_MARKER);
+
+    peer.socket.close();
+    await peer.closed;
+  });
+
+  it('does not forward live edits from a writer to a reader', async () => {
+    const carl = await loginAs('carl');
+    const marker = `rozpracovano-${Date.now()}`;
+
+    const reader = await connect(RUNBOOK, await mintToken(RUNBOOK, carl));
+    await waitFor(() => receivedText(reader).includes(PUBLISHED_MARKER), 'the reader to have the document');
+    const before = receivedText(reader);
+
+    const writer = await connect(RUNBOOK, await mintToken(RUNBOOK, bona));
+    await waitFor(() => receivedText(writer).includes(DRAFT_MARKER), 'the writer to have the draft');
+
+    appendParagraph(writer.ydoc, marker);
+    await waitFor(
+      () => receivedText(writer).includes(marker),
+      'the writer to see their own edit',
+      // The guard under test is a per-update skip in the room's fan-out. A writer
+      // whose own edit never came back would make "and the reader didn't get it"
+      // pass for the wrong reason, so this waits for the positive case first.
+    );
+
+    // The negative half. Yjs updates arrive in milliseconds when they arrive at
+    // all, so a bounded wait that finds nothing is a real absence rather than a
+    // timing accident — and the room's debounce (400 ms) is well inside this window,
+    // which rules out the other way this could pass: a reader served from a
+    // snapshot that simply had not been refreshed.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(receivedText(reader)).not.toContain(marker);
+    expect(receivedText(reader)).toBe(before);
+    // ...and the writer really did send it, so the skip happened server-side.
+    expect(writer.frames.length).toBeGreaterThan(0);
+
+    reader.socket.close();
+    writer.socket.close();
+    await Promise.all([reader.closed, writer.closed]);
+  });
+
+  it('refuses a reader a document that has never been published, indistinguishably', async () => {
+    // A brand-new document has no version rows, so there is no published body to
+    // serve. Carl gets a direct READ grant on it, which is enough to mint a ticket
+    // and not enough to see a body: READ alone does not conjure content.
+    //
+    // The first attempt at this test used the seeded draft-only document and hung
+    // for 60 seconds, because Bona holds WRITE on it — so her ticket was a WRITE
+    // ticket, which joins the room and stays open forever. Asserting `permission:
+    // 'READ'` below is what stops that mistake: without it, a test named "refuses a
+    // reader" can silently be exercising the writer's path.
+    const created = await http.post(
+      '/documents',
+      { title: 'Netiskáno', groupId: group('engineering') },
+      bona,
+    );
+    const unpublished = (created.body as { id: string }).id;
+    const grant = await http.post(
+      '/permissions',
+      {
+        subjectKind: 'user',
+        subjectId: user('carl'),
+        targetKind: 'document',
+        targetId: unpublished,
+        permission: 'READ',
+      },
+      bona,
+    );
+    expect(grant.status).toBe(201);
+
+    const carl = await loginAs('carl');
+    const minted = await http.post(`/documents/${unpublished}/realtime-token`, undefined, carl);
+    expect((minted.body as { permission: string }).permission).toBe('READ');
+
+    const socket = new WebSocket(
+      `${wsOrigin()}/api/realtime/${unpublished}?ticket=${(minted.body as { ticket: string }).ticket}`,
+    );
+    const code = await new Promise<number>((resolve) => {
+      socket.on('error', () => resolve(-1));
+      socket.on('close', resolve);
+    });
+    // The same close code a nonexistent document produces: the wire never answers
+    // "this document exists and is unfinished" to someone entitled only to what has
+    // been published (PLAN §3.3).
+    expect(code).toBe(4404);
   });
 });
 
