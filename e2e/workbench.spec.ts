@@ -226,6 +226,41 @@ test('a reader is offered no write affordances in the tree', async ({ page }) =>
   );
 });
 
+test('the tree shows all three levels and honors a deny override', async ({ page }) => {
+  // SPEC.md §1's first bullet names three levels — skupiny, kategorie, dokumenty —
+  // and a tree that rendered only groups and documents would satisfy every
+  // assertion above. Ana is the reader who sees the middle level: the one
+  // category hangs off Payroll, which she reaches by inheriting from HR.
+  await login(page, 'ana');
+  const tree = page.locator('.tree[role="tree"]');
+
+  await expect(tree.locator('.row.group')).toHaveCount(2); // HR, Payroll
+  await expect(tree.locator('.row.category')).toHaveCount(1);
+  await expect(tree.locator('.row.category')).toContainText('Mzdové předpisy');
+  // The category nests under its group, so it must be indented deeper.
+  expect(
+    await tree
+      .locator('.row.category')
+      .first()
+      .evaluate((el) => el.style.getPropertyValue('--depth')),
+  ).not.toBe('0');
+
+  // Ana's document-level NONE (SPEC.md:82) denies her the salaries document even
+  // though HR inheritance reaches it. This is that override observable in the
+  // hierarchy rather than only in an API response.
+  await expect(tree.locator('.row.document', { hasText: 'Příručka HR' })).toBeVisible();
+  await expect(tree.locator('.row.document', { hasText: 'Ohodnocování' })).toHaveCount(0);
+
+  // And the badge next to the group must agree with what she can see. An earlier
+  // version of GET /groups counted documents without the ACL, so Ana's tree read
+  // "Payroll 1" above an empty set of Payroll rows: the group was open to her, the
+  // document was not, and the number told her it existed. That is PLAN §3.3's leak
+  // in one rendered digit, which is why it is checked here in the browser rather
+  // than only at the API — the backend guard is `counts agree with the ACL`.
+  const payroll = tree.locator('.row.group', { hasText: 'Payroll' });
+  await expect(payroll.locator('.count')).toHaveText('0');
+});
+
 test('NONE is reachable in the grant editor and renders as a denial', async ({ page }) => {
   // Phase 1 deferred this because the deny override (SPEC.md:82) needed to appear
   // next to the grant it overrides. What a browser can check is the part of that

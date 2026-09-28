@@ -41,16 +41,33 @@ export class GroupsController {
     };
   }
 
-  /** Groups the caller can READ, as a flat list — the tree is assembled client-side. */
+  /**
+   * Groups the caller can READ, as a flat list — the tree is assembled client-side.
+   *
+   * The document count is ACL-filtered, because an unfiltered one is a leak: a
+   * group the caller can read but whose documents they mostly cannot would report
+   * "3 documents" next to an empty list, which discloses that hidden documents
+   * exist. PLAN.md §3.3 forbids exactly that, and it is observable — Ana sees
+   * Payroll counted 1 while `GET /documents` returned her nothing from it, because
+   * her `NONE` override on that one document hides it from her listing but not
+   * from a bare `count(*)`. Counting what the caller may READ makes the number
+   * agree with the list it sits beside.
+   */
   @Get()
   async list(@CurrentUser() me: AuthUser): Promise<unknown[]> {
-    const filter = this.permissions.groupsFilter(me.id, 'READ', { offset: 0 });
+    // offset 1 because the actor id is passed ahead of the filter's own two
+    // parameters; the count subquery takes $1 and the filter becomes $2/$3.
+    // Passing offset 0 would make $2 mean "the required permission" inside the
+    // subquery — a uuid cast failure at best, a wrong ACL binding at worst,
+    // which is the trap documentsFilter's doc comment warns about.
+    const filter = this.permissions.groupsFilter(me.id, 'READ', { offset: 1 });
     const rows = await query<GroupRow>(
       `SELECT g.id, g.parent_id, g.name,
-              (SELECT count(*)::text FROM documents d WHERE d.group_id = g.id) AS n_documents
+              (SELECT count(*)::text FROM documents d
+                WHERE d.group_id = g.id AND can_access_document($1, d.id, 'READ')) AS n_documents
          FROM groups g ${filter.sql}
         ORDER BY g.name`,
-      filter.params,
+      [me.id, ...filter.params],
     );
     return rows.map(GroupsController.dto);
   }
@@ -137,6 +154,11 @@ export class GroupsController {
     // CTE rather than UPDATE ... RETURNING with a correlated subquery: the
     // count must reflect the row *after* the write, and RETURNING's visibility
     // rules for sibling rows are not something to rely on by memory.
+    //
+    // ACL-filtered like the list, for a narrower case than GET /groups: managing
+    // a group does not imply reading every document in it, so a manager holding a
+    // NONE override would otherwise be shown a count that includes the document
+    // they are denied.
     const [row] = await query<GroupRow>(
       `WITH updated AS (
          UPDATE groups
@@ -146,9 +168,10 @@ export class GroupsController {
           RETURNING id, parent_id, name
        )
        SELECT u.id, u.parent_id, u.name,
-              (SELECT count(*)::text FROM documents d WHERE d.group_id = u.id) AS n_documents
+              (SELECT count(*)::text FROM documents d
+                WHERE d.group_id = u.id AND can_access_document($5, d.id, 'READ')) AS n_documents
          FROM updated u`,
-      [id, name ?? null, reparent, reparent ? (body.parentId ?? null) : null],
+      [id, name ?? null, reparent, reparent ? (body.parentId ?? null) : null, me.id],
     );
     if (!row) throw notFound();
     return GroupsController.dto(row);

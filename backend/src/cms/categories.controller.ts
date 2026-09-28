@@ -41,14 +41,19 @@ export class CategoriesController {
   async list(@CurrentUser() me: AuthUser): Promise<unknown[]> {
     // The filter applies to the category's group, so name the column rather
     // than post-processing the generated SQL.
-    const filter = this.permissions.groupsFilter(me.id, 'READ', { column: 'c.group_id', offset: 0 });
+    // offset 1: the actor id precedes the filter's parameters so the count
+    // subquery can bind $1 to it. The count is ACL-filtered for the same reason
+    // groups.controller.ts filters its own — a number beside a list the ACL has
+    // emptied would disclose that hidden documents exist (PLAN.md §3.3).
+    const filter = this.permissions.groupsFilter(me.id, 'READ', { column: 'c.group_id', offset: 1 });
     const rows = await query<CategoryRow>(
       `SELECT c.id, c.group_id, c.name, c.position,
-              (SELECT count(*)::text FROM documents d WHERE d.category_id = c.id) AS n_documents
+              (SELECT count(*)::text FROM documents d
+                WHERE d.category_id = c.id AND can_access_document($1, d.id, 'READ')) AS n_documents
          FROM categories c
          ${filter.sql}
         ORDER BY c.group_id, c.position, c.name`,
-      filter.params,
+      [me.id, ...filter.params],
     );
     return rows.map(CategoriesController.dto);
   }
@@ -100,9 +105,10 @@ export class CategoriesController {
           RETURNING id, group_id, name, position
        )
        SELECT u.id, u.group_id, u.name, u.position,
-              (SELECT count(*)::text FROM documents d WHERE d.category_id = u.id) AS n_documents
+              (SELECT count(*)::text FROM documents d
+                WHERE d.category_id = u.id AND can_access_document($5, d.id, 'READ')) AS n_documents
          FROM updated u`,
-      [id, name ?? null, body.position ?? null, body.groupId ?? null],
+      [id, name ?? null, body.position ?? null, body.groupId ?? null, me.id],
     );
     if (!row) throw notFound();
     return CategoriesController.dto(row);

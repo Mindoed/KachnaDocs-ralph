@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import type { ApiErrorBody } from '@kachnadocs/shared';
+import { query } from '../src/db';
 import { GHOST_ID, doc, group, http, loginAs, resetDatabase, startServer, stopServer, user } from './helpers';
 
 /**
@@ -420,5 +421,80 @@ describe('deletion', () => {
       [id],
     );
     expect(orphans[0]?.n).toBe(0);
+  });
+});
+
+/**
+ * A reported count is an assertion about existence, so it falls under the same
+ * rule as a row: PLAN §3.3 says a caller without READ must not learn a document
+ * exists. An ACL-unfiltered `count(*)` broke that. Ana saw Payroll counted 1 in
+ * `GET /groups` while `GET /documents` listed her nothing from it — her NONE
+ * override hid the document from her listing but not from a bare count. I found
+ * this by printing the rendered tree in a browser, not by reading the SQL.
+ *
+ * Asserted as a cross-endpoint invariant rather than as one expected number, so
+ * it holds for every actor, group and category instead of the pair I happened to
+ * notice. The comparison is between two independently ACL-filtered endpoints,
+ * which is what gives it a chance of catching anything: a test that recomputed
+ * the expected count with the same SQL would have agreed with the leak.
+ */
+describe('counts agree with the ACL', () => {
+  const rows = (body: unknown): Record<string, unknown>[] => body as Record<string, unknown>[];
+
+  for (const who of ['bona', 'ana', 'carl', 'dana'] as const) {
+    it(`reports for ${who} exactly the documents ${who} can list`, async () => {
+      const token = await loginAs(who);
+      const [groups, categories, docs] = await Promise.all([
+        http.get('/groups', token),
+        http.get('/categories', token),
+        http.get('/documents', token),
+      ]);
+      expect(groups.status).toBe(200);
+      expect(categories.status).toBe(200);
+      expect(docs.status).toBe(200);
+      const readable = rows(docs.body);
+
+      const mismatches: string[] = [];
+      for (const g of rows(groups.body)) {
+        const expected = readable.filter((d) => d.groupId === g.id).length;
+        if (g.documentCount !== expected) {
+          mismatches.push(
+            `group ${g.name}: count says ${String(g.documentCount)}, listing shows ${expected}`,
+          );
+        }
+      }
+      for (const c of rows(categories.body)) {
+        const expected = readable.filter((d) => d.categoryId === c.id).length;
+        if (c.documentCount !== expected) {
+          mismatches.push(
+            `category ${c.name}: count says ${String(c.documentCount)}, listing shows ${expected}`,
+          );
+        }
+      }
+      expect(mismatches).toEqual([]);
+    });
+  }
+
+  it('never reports a nonzero count where every document is denied', async () => {
+    // The narrow case the invariant covers in general, stated plainly because it
+    // is the shape that leaks: a visible group, no visible documents.
+    const groups = await http.get('/groups', ana);
+    // Ana inherits READ on Payroll through her HR role, so the group is listed
+    // for her even though nothing inside it is.
+    expect(rows(groups.body).some((g) => g.id === group('payroll'))).toBe(true);
+    const payroll = rows(groups.body).find((g) => g.id === group('payroll'));
+    expect(payroll?.documentCount).toBe(0);
+
+    // And the group really is not empty, or the assertion above would pass on an
+    // empty database for the wrong reason. Read straight from the table with no
+    // ACL in sight: the point is a fact the filtered query could not fake. Bona
+    // cannot read this one — her grants cover Engineering only — which is why the
+    // check is the raw row count and not somebody's HTTP listing.
+    const inside = await query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM documents WHERE group_id = $1',
+      [group('payroll')],
+    );
+    expect(inside[0]?.n).toBeGreaterThan(0);
+    expect((await http.get(`/documents/${doc('salaries')}`, ana)).status).toBe(404);
   });
 });
