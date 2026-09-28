@@ -612,6 +612,18 @@ export class RealtimeGateway implements OnModuleDestroy {
     };
     this.rooms.set(documentId, room);
 
+    // The seeding branch above set `dirty` to say "the projection beside this
+    // `y_state` is stale". Saying it is only half of it: `dirty` is cleared solely by
+    // a flush, and the only thing that ever schedules one is the ydoc update handler
+    // below — which a document nobody types in never fires. Without this, a room
+    // seeded from `draft_body` stays dirty for the life of the process, and since
+    // `saved: !room.dirty` *is* the autosave indicator, everyone who opens such a
+    // document is told "Ukládám…" forever about a document they never edited. On a
+    // freshly seeded database that is the very first connection to every document,
+    // which is why it survived every test that reused a database (`y_state` already
+    // populated, seeding branch not taken) and appeared only once the gate re-seeded.
+    if (dirty) this.schedulePersist(room);
+
     ydoc.on('update', (update: Uint8Array, origin: unknown) => {
       // The origin is the socket that caused the update, so it never receives its
       // own change back. Yjs is idempotent, so echoing would not corrupt anything —

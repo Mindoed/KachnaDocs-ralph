@@ -236,6 +236,24 @@ async function waitForDraft(documentId: string, marker: string, ms = 5000): Prom
   }
 }
 
+/**
+ * Poll the autosave endpoint until it says the document is saved (or give up).
+ *
+ * Returns the final body rather than throwing, so a failure prints the flag instead
+ * of a timeout message: "expected saved to be true, it was false for 3 s" is the
+ * whole diagnosis, and a helper that throws loses which of the two possibilities it
+ * was — never-settled or settled-then-dirty-again.
+ */
+async function untilSaved(documentId: string, ms = 3000): Promise<{ saved: boolean; peers: number }> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const res = await http.get(`/documents/${documentId}/realtime-status`, bona);
+    const body = res.body as { saved: boolean; peers: number };
+    if (body.saved || Date.now() > deadline) return body;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 async function draftRow(documentId: string): Promise<{
   y_state: Buffer | null;
   draft_body: unknown;
@@ -714,6 +732,48 @@ describe('persistence', () => {
     // state must still be contained in it rather than replaced.
     expect(second.y_state?.length ?? 0).toBeGreaterThan(0);
     expect(second.draft_markdown).toBe(first.draft_markdown);
+  });
+
+  it('settles the save state for a document that was opened and never typed in', async () => {
+    // The seeding path marks the room dirty on purpose, so the projection beside a
+    // freshly seeded `y_state` gets written rather than left describing the draft that
+    // was there before. Marking something dirty creates an obligation to flush it: if
+    // nothing ever schedules that flush, the flag is stuck for the life of the process
+    // — and `saved: false` *is* the autosave indicator, so a reader or writer who opens
+    // a seeded document, changes nothing, and waits is told "Ukládám…" forever, about a
+    // document nobody edited. The whole first connection to every document on a newly
+    // seeded database is that state, which is what this pins.
+    //
+    // Asserted while connected, deliberately. The last-disconnect release path flushes
+    // on its own, so the same document's database row looks perfectly current by the
+    // time anyone could read it after hanging up: the bug would leave no trace in the
+    // row, and a test written against the row after close would pass with it present.
+    const temporary = await http.post(
+      '/documents',
+      { title: `Čerstvý-${Date.now()}`, groupId: group('engineering') },
+      bona,
+    );
+    const id = (temporary.body as { id: string }).id;
+    const seed = await draftRow(id);
+    expect(seed.y_state).toBeNull(); // so this really is the first connection
+
+    const peer = await connect(id, await mintToken(id, bona));
+    // A brand-new document has no content to wait for, so the handshake itself is the
+    // signal: the sync step-2 reply is the first frame on the wire, and until the room
+    // has been loaded there is nothing on it.
+    await waitFor(() => peer.frames.length > 0, 'the sync reply');
+
+    // Polled rather than slept, and polled on the endpoint the indicator uses: the
+    // claim being tested is "a document opened without a keystroke reaches the
+    // database on the writer's own cadence", which is only checkable against the
+    // server's notion of dirty. Two debounce windows is the generous end of that.
+    const settled = await untilSaved(id);
+    expect(settled.saved).toBe(true);
+
+    const row = await draftRow(id);
+    expect(row.y_state).not.toBeNull();
+    peer.socket.close();
+    await peer.closed;
   });
 
   it('leaves no room resident after every client disconnects', async () => {
