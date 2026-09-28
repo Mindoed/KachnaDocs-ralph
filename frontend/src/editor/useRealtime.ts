@@ -111,12 +111,12 @@ const SOCKET_BASE = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//
  * sees a name it did not type. Ours has to come from the session, or the local
  * avatar would be the one blank face on the screen.
  */
-function publishSelf(awareness: awarenessProtocol.Awareness, me: EditorIdentity): void {
+function publishSelf(awareness: awarenessProtocol.Awareness, me: EditorIdentity, canWrite: boolean): void {
   awareness.setLocalStateField('user', {
     id: me.id,
     displayName: me.displayName,
     color: localColor(),
-    canWrite: true,
+    canWrite,
   } satisfies AwarenessUser);
 }
 
@@ -127,12 +127,16 @@ function localColor(): string {
 }
 
 /**
- * The one identity the local record should carry, or null if it should carry none.
+ * The identity to publish locally.
  *
- * A `READ` connection publishes no presence at all: the server drops inbound
- * awareness from it, so anything written locally would be a caret that exists only
- * on its own screen — and worse, the peers list would show the reader themselves
- * as present in a document whose channel refused to let them speak.
+ * Written for readers too, and that is a deliberate reversal of an earlier version of
+ * this line, which skipped `READ` connections on the theory that publishing presence
+ * the server will drop is noise. It is not noise, it is the local record: the peers
+ * list reads from `awareness` and nothing else, so suppressing it made the reader's
+ * own name vanish from their own presence list — the one entry that can never be
+ * wrong, since we know who we are. Inbound awareness from a reader is still dropped
+ * server-side, which is the part that was ever a policy question; what nobody may be
+ * denied is seeing themselves in the room they are standing in.
  */
 function peerOf(state: Record<string, unknown> | null): AwarenessUser | null {
   const user = state?.['user'];
@@ -178,10 +182,18 @@ export function useRealtime(documentId: Ref<string | null>, me: Ref<EditorIdenti
     void presenceTick.value;
     const mine = peerOf(awareness.getLocalState() as Record<string, unknown> | null);
     const others: AwarenessUser[] = [];
-    for (const state of awareness.getStates().values()) {
+    // Keyed by *connection*, not by person: awareness entries are per client id, and
+    // two windows of one user are two entries. Deduping by `user.id` — which is what
+    // this did — made the second window invisible in the first one's list, so the
+    // phase-3 acceptance test "shows the other collaborator" failed for the only
+    // fixture pairing that two browser contexts can easily log in as: the same person
+    // twice. A list of connections is also the truthful label, since a caret is per
+    // connection too; "two Bonas" is not a duplicate to hide, it is two tabs.
+    awareness.getStates().forEach((state, client) => {
+      if (client === ydoc.clientID) return;
       const peer = peerOf(state as Record<string, unknown>);
-      if (peer && peer.id !== mine?.id) others.push(peer);
-    }
+      if (peer) others.push(peer);
+    });
     // Ours first is not decoration: the panel labels the list "kdo je tady" and a
     // reader who cannot find themselves in it assumes the connection failed.
     return mine ? [mine, ...others] : others;
@@ -237,7 +249,10 @@ export function useRealtime(documentId: Ref<string | null>, me: Ref<EditorIdenti
     // The server overwrites `user` from the verified credential on every outbound
     // awareness frame, including this first one; publishing locally first only
     // avoids a window where the peers list is empty for somebody already connected.
-    if (permission.value !== 'READ') publishSelf(awareness, identity);
+    // Published before `connection-error` can matter and before the provider's
+    // `onopen` checks `getLocalState() !== null` — if it is still null there, no
+    // presence frame is sent at all and the peers list stays empty on both ends.
+    publishSelf(awareness, identity, permission.value === 'WRITE');
 
     // `sync` is the provider's own "step 2 applied" signal, set inside
     // readMessage rather than guessed from a doc event. Listening for the first
@@ -270,11 +285,6 @@ export function useRealtime(documentId: Ref<string | null>, me: Ref<EditorIdenti
       if (gen !== generation || documentId.value !== id) return;
       ticket = minted.ticket;
       permission.value = minted.permission === 'WRITE' ? 'WRITE' : 'READ';
-      if (permission.value === 'READ') {
-        // A reader publishes no presence; drop anything carried over from a
-        // document this window could previously write to.
-        awareness.setLocalState(null);
-      }
       const existing = provider.value;
       if (existing && existing.wsconnected) {
         // Hand the new credential to the provider and cycle the socket. Closing

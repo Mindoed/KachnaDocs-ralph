@@ -189,10 +189,24 @@ export class ReferenceResolver {
         }
         void this.fetch(refs)
           .then((rows) => {
-            // Zip by the anchor field the server echoes rather than by index, so a
-            // server that reorders or drops one cannot label the wrong link.
+            // Zipped by the anchor the server echoes, not by position: a server that
+            // reorders or drops one row must not mislabel a different link.
+            //
+            // Keyed on `slug ?? documentId` because the request token is whatever the
+            // author wrote — a slug for a hand-typed link, an id otherwise — and the
+            // response always carries the uuid. Keying on `documentId` alone resolved
+            // every id-based reference and *no* slug-based one, and the failure was
+            // silent by construction: the view kept its "Načítám odkaz…" label, which
+            // is also the honest label for "still in flight", so nothing distinguished
+            // a reference that would never resolve from one just arrived at. The
+            // endpoint accepts both spellings (its token join tests slug OR id), so
+            // this side has to recognise both in the answer.
             const byToken = new Map<string, ResolvedHeadingDto>();
-            for (const row of rows) byToken.set(ReferenceResolver.token(row.documentId, row.anchor), row);
+            for (const row of rows) {
+              const name = row.slug ?? row.documentId;
+              byToken.set(ReferenceResolver.token(name, row.anchor), row);
+              if (row.slug) byToken.set(ReferenceResolver.token(row.documentId, row.anchor), row);
+            }
             for (const ref of refs) {
               const row = byToken.get(ref);
               if (!row) continue;

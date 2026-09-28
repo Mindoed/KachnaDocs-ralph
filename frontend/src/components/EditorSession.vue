@@ -7,7 +7,7 @@ import { useCmsStore } from '../stores/cms';
 import { editorExtensions } from '../editor/extensions';
 import { beginEditor, endEditor, type ReferenceResolver } from '../editor/references';
 import { useRealtime, type EditorIdentity } from '../editor/useRealtime';
-import { route, scrollToAnchor } from '../editor/deepLink';
+import { openDocument, route, scrollToAnchor } from '../editor/deepLink';
 
 /**
  * One editing session for one document (SPEC.md §2).
@@ -174,6 +174,11 @@ async function copyHeadingLink(): Promise<void> {
   }
 
   const url = `${window.location.origin}/d/${encodeURIComponent(props.documentId)}#${encodeURIComponent(anchor)}`;
+  // The address bar is set to the link that was just copied. A copy that left the URL
+  // naming a different place than the clipboard would make the two disagree the moment
+  // someone copied a link and then bookmarked the page instead — and the URL is the
+  // form another person can click, so it is the one worth having correct.
+  openDocument(props.documentId, anchor, true);
   try {
     await navigator.clipboard.writeText(url);
     notice.value = `Odkaz zkopírován: #${anchor}`;
@@ -267,7 +272,7 @@ watch(canEdit, createEditor);
       }}</span>
     </header>
 
-    <div v-if="canEdit" class="toolbar">
+    <div v-if="canEdit" class="toolbar" data-testid="toolbar">
       <button type="button" @click="editor?.chain().focus().toggleBold().run()">Tučně</button>
       <button type="button" @click="editor?.chain().focus().toggleItalic().run()">Kurzíva</button>
       <button type="button" @click="editor?.chain().focus().toggleHeading({ level: 2 }).run()">Nadpis</button>
