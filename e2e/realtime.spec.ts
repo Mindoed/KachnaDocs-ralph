@@ -21,11 +21,130 @@ import { expect, test, type BrowserContext, type Locator, type Page } from '@pla
  * the gateway switched off. `disableBc: true` in `useRealtime.ts` closes that hole;
  * this paragraph exists so whoever re-enables it finds this sentence first.
  *
- * Fixtures come from `backend/src/seed.ts`. Bona holds WRITE+MANAGE on the deploy
- * runbook; Carl holds a direct READ grant on that one document and nothing else.
+ * ## Every document here is created by the test that uses it
+ *
+ * Not from `backend/src/seed.ts`. The seeded fixtures are `workbench.spec.ts`'s
+ * subject and it asserts their immutability — the runbook has exactly one version and
+ * its draft diffs against its published text with +0/−0. This suite types in
+ * documents and publishes them, so sharing those rows broke both files: the runbook's
+ * diff grew a line, and the presence list counted phase 2's editor as a collaborator.
+ * `workers: 1` in `playwright.config.ts` makes that collision deterministic rather
+ * than intermittent, which is precisely why it can no longer be lived with.
+ *
+ * So each test mints its own documents over the API and deletes them afterwards
+ * (`owned`), and the only seeded things used here are the *users* — Bona, who can
+ * write inside Engineering, and Carl, who holds one direct READ grant that this suite
+ * never needs to touch.
  */
 
-const RUNBOOK_TITLE = 'Nasazovací runbook';
+/** Mirrors `playwright.config.ts`; Node-side fixture calls cannot use Playwright's baseURL. */
+const ORIGIN = process.env.E2E_ORIGIN ?? `http://127.0.0.1:${process.env.E2E_PORT ?? '3100'}`;
+
+/** Engineering — the group Bona MANAGEs, so documents created there are hers to publish. */
+const ENGINEERING = 'bbbbbbb3-0000-0000-0000-000000000000';
+/** Carl, who must be granted READ per document (he has no role that reaches Engineering). */
+const CARL = '33333333-3333-3333-3333-333333333333';
+
+interface OwnedDocument {
+  id: string;
+  slug: string;
+}
+
+const tokens = new Map<string, string>();
+
+/** A dev-login token for Node, so fixtures are built by the API rather than by SQL. */
+async function tokenFor(handle: string): Promise<string> {
+  const cached = tokens.get(handle);
+  if (cached) return cached;
+  const res = await fetch(`${ORIGIN}/api/auth/dev-login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ handle }),
+  });
+  if (!res.ok) throw new Error(`dev-login ${handle} failed: ${res.status}`);
+  const { token } = (await res.json()) as { token: string };
+  tokens.set(handle, token);
+  return token;
+}
+
+/**
+ * An API call made as `handle`.
+ *
+ * Fixtures go through HTTP rather than `query()` on purpose: a document inserted with
+ * raw SQL would bypass whatever the create path decides about slugs, ownership and
+ * the empty draft, and the suite would then be testing a shape the product cannot
+ * produce.
+ */
+async function as<T>(handle: string, method: string, path: string, payload?: unknown): Promise<T> {
+  const res = await fetch(`${ORIGIN}/api${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${await tokenFor(handle)}`,
+      ...(payload === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}: ${await res.text()}`);
+  return (await res.json()) as T;
+}
+
+/** A ProseMirror doc: heading with a known anchor, then one paragraph per string. */
+function pmDoc(paragraphs: string[], heading = 'Obsah'): unknown {
+  return {
+    type: 'doc',
+    content: [
+      { type: 'heading', attrs: { anchor: 'sec-1', level: 1 }, content: [{ type: 'text', text: heading }] },
+      ...paragraphs.map((text) => ({ type: 'paragraph', content: [{ type: 'text', text }] })),
+    ],
+  };
+}
+
+/**
+ * Creates a document this test owns, and arranges for it to be removed.
+ *
+ * Deletion happens in `afterEach` against a per-test list rather than inline, because
+ * an assertion that fails halfway would otherwise leave the row behind for the rest of
+ * the run — which is exactly the residue that made the seeded fixtures unusable.
+ */
+let owned: OwnedDocument[] = [];
+async function ownDoc(title: string): Promise<OwnedDocument> {
+  const created = await as<OwnedDocument>('bona', 'POST', '/documents', {
+    title: `${title} ${Date.now()}`,
+    groupId: ENGINEERING,
+  });
+  owned.push(created);
+  return created;
+}
+
+/** Publishes the document's current draft as its next version. */
+async function publishAs(handle: string, id: string): Promise<void> {
+  await as(handle, 'POST', `/documents/${id}/publish`, { comment: 'e2e' });
+}
+
+/**
+ * Writes a draft from outside the editor.
+ *
+ * `PUT /draft` rather than typing: the reader tests need a draft that differs from the
+ * published version *before* anybody connects, and typing it in first would mean a
+ * writer's websocket produced the difference — which is the case the live-typing
+ * assertion covers, not this one.
+ */
+async function putDraft(id: string, paragraphs: string[], heading = 'Obsah'): Promise<void> {
+  await as('bona', 'PUT', `/documents/${id}/draft`, {
+    body: pmDoc(paragraphs, heading),
+    markdown: `# ${heading}\n\n${paragraphs.join('\n\n')}`,
+  });
+}
+
+async function grantCarlRead(id: string): Promise<void> {
+  await as('bona', 'POST', '/permissions', {
+    subjectKind: 'user',
+    subjectId: CARL,
+    targetKind: 'document',
+    targetId: id,
+    permission: 'READ',
+  });
+}
 
 /** Signs in through the dev login form, as a user would. */
 async function login(page: Page, handle: string): Promise<void> {
@@ -36,22 +155,22 @@ async function login(page: Page, handle: string): Promise<void> {
 }
 
 /**
- * Returns to a URL after a reload, *without* signing in again.
+ * Opens one of this test's documents by id.
  *
- * The session lives in `localStorage`, which survives a reload, so the app renders
- * the workbench directly and there is no username field to fill. Calling `login`
- * after `reload` fails on a missing input — which reads as a broken login form and is
- * actually a test that signed in twice.
+ * A direct navigation rather than a tree click: the tree is phase 2's UI, it is already
+ * covered there, and clicking a row whose title embeds `Date.now()` would make every
+ * failure in this file a locator problem. The URL is also the shape a deep link
+ * arrives as, which is what the anchor tests need anyway.
  */
+async function openDocument(page: Page, id: string): Promise<void> {
+  await page.goto(`/d/${encodeURIComponent(id)}`);
+  await expect(surface(page)).toBeVisible();
+}
+
+/** Returns to a URL after a reload, *without* signing in again. */
 async function revisit(page: Page, url: string): Promise<void> {
   await page.goto(url);
   await expect(page.locator('footer.status')).toBeVisible();
-}
-
-/** Opens a document in the editor by clicking it in the CMS tree. */
-async function openDocument(page: Page, title: string): Promise<void> {
-  await page.locator('.tree .row.document', { hasText: title }).first().click();
-  await expect(surface(page)).toBeVisible();
 }
 
 const surface = (page: Page): Locator => page.locator('[data-testid=editor-host] .tiptap');
@@ -97,8 +216,7 @@ async function typeAtEnd(page: Page, text: string): Promise<void> {
  *   The two arms have to differ in exactly one thing, the permission behind the ticket.
  * - The ticket is minted by the page's own session over the page's own origin, and the
  *   document id is read from the page's own URL (`/d/<id>`), so neither can be the
- *   harness's choice. The document the page is looking at is also the only one both
- *   users are guaranteed to have access to.
+ *   harness's choice.
  * - "Not refused" has to be an answer. An accepted frame produces no close at all, so a
  *   promise that settles only on close never resolves for a writer; that arrived as a
  *   30-second timeout with "target page, context or browser has been closed", which
@@ -145,6 +263,7 @@ test.describe('collaborative editing, two browsers', () => {
   let other: Page;
 
   test.beforeEach(async ({ browser }) => {
+    owned = [];
     contextA = await browser.newContext();
     contextB = await browser.newContext();
     bona = await contextA.newPage();
@@ -154,13 +273,20 @@ test.describe('collaborative editing, two browsers', () => {
   test.afterEach(async () => {
     await contextA.close();
     await contextB.close();
+    // Deleted after the browsers are gone: a live websocket holds the room open, and
+    // `discard` on a document with connections is a different path than deleting one
+    // that nobody is in. Closing first keeps teardown on the ordinary path.
+    for (const doc of owned.splice(0)) {
+      await as('bona', 'DELETE', `/documents/${doc.id}`).catch(() => null);
+    }
   });
 
   test('what one writer types appears in the other without a reload', async () => {
+    const doc = await ownDoc('Sync');
     await login(bona, 'bona');
     await login(other, 'bona');
-    await openDocument(bona, RUNBOOK_TITLE);
-    await openDocument(other, RUNBOOK_TITLE);
+    await openDocument(bona, doc.id);
+    await openDocument(other, doc.id);
 
     const marker = `vet-a-${Date.now()}`;
     await typeAtEnd(bona, marker);
@@ -177,45 +303,64 @@ test.describe('collaborative editing, two browsers', () => {
   });
 
   test('simultaneous edits in different places both survive', async () => {
+    // Two paragraphs, and one writer per paragraph.
+    //
+    // This test used to press Control+End in *both* browsers, which put the two
+    // inserts at the same offset and made the title a lie. Yjs still lost nothing
+    // there — a concurrent insert at one position is exactly what its transform
+    // handles — but it does not promise the two survive contiguously, so the merged
+    // text came out `spolecny-…780 poznamka A0 poznamka B`: the seed's tail had been
+    // split by the other writer's paragraph. That is correct behaviour, and the
+    // assertion was over-specified — it read a contiguity requirement into a CRDT that
+    // makes a weaker, honest guarantee.
+    //
+    // Editing separate blocks is both the claim in the title and the case a last
+    // -writer-wins implementation actually loses, so the assertions below can be
+    // strict about order without depending on how a tie is broken.
+    const first = `odstavec-jeden-${Date.now()}`;
+    const second = `odstavec-dva-${Date.now()}`;
+    const doc = await ownDoc('Merge');
+    await putDraft(doc.id, [first, second]);
     await login(bona, 'bona');
     await login(other, 'bona');
-    await openDocument(bona, RUNBOOK_TITLE);
-    await openDocument(other, RUNBOOK_TITLE);
+    await openDocument(bona, doc.id);
+    await openDocument(other, doc.id);
+    await ready(bona);
+    await ready(other);
 
-    // One shared paragraph to start from, then a split: two writers typing in the
-    // *same* text block is the case last-writer-wins loses, so it is the one worth
-    // constructing deliberately rather than hoping two Caret+Ends happen to land
-    // apart.
-    const seed = `spolecny-odstavec-${Date.now()}`;
-    await typeAtEnd(bona, seed);
-    await expect(await ready(other)).toContainText(seed, { timeout: 15_000 });
+    // Both writers type without either waiting for the other, so the two updates are
+    // genuinely in flight at the same time rather than arriving in the order typed.
+    const typing = [
+      [bona, 'Home', 'A'],
+      [other, 'Control+End', 'B'],
+    ] as const;
+    await Promise.all(
+      [...typing].map(async ([page, move, letter]) => {
+        const editor = await ready(page);
+        await editor.click();
+        await page.keyboard.press(move);
+        await page.keyboard.press('Enter');
+        await page.keyboard.type(`poznamka ${letter}`);
+      }),
+    );
 
-    for (const [page, letter] of [
-      [bona, 'A'],
-      [other, 'B'],
-    ] as const) {
-      const editor = await ready(page);
-      await editor.click();
-      await page.keyboard.press('Control+End');
-      await page.keyboard.press('Enter');
-      await page.keyboard.type(` poznamka ${letter}`);
-    }
-
-    // Both letters, in both browsers, and the shared seed still there. A merge that
-    // lost one side would leave exactly one of A/B.
     for (const page of [bona, other]) {
       const editor = await ready(page);
-      await expect(editor).toContainText('poznamka A', { timeout: 15_000 });
-      await expect(editor).toContainText('poznamka B', { timeout: 15_000 });
-      await expect(editor).toContainText(seed);
+      // Each note sits in its own block, which is what "both survived" means when the
+      // blocks were different: neither overwrote the other.
+      await expect(editor.locator('p', { hasText: 'poznamka A' })).toHaveCount(1);
+      await expect(editor.locator('p', { hasText: 'poznamka B' })).toHaveCount(1);
+      await expect(editor).toContainText(first);
+      await expect(editor).toContainText(second);
     }
   });
 
   test('the presence list names the collaborators on both sides', async () => {
+    const doc = await ownDoc('Presence');
     await login(bona, 'bona');
     await login(other, 'bona');
-    await openDocument(bona, RUNBOOK_TITLE);
-    await openDocument(other, RUNBOOK_TITLE);
+    await openDocument(bona, doc.id);
+    await openDocument(other, doc.id);
 
     // Both directions on purpose: "shows the other person" and "shows me too" are
     // different bugs, and a list that renders only yourself looks correct in a
@@ -226,10 +371,20 @@ test.describe('collaborative editing, two browsers', () => {
   });
 
   test('a READ-only user is refused by the server, not by the toolbar', async () => {
+    const doc = await ownDoc('Readonly');
+    // The published text and the draft have to differ *before anyone connects*, so the
+    // leak this tests for cannot be attributed to a websocket race. Written through the
+    // draft endpoint, which is also the only way to make the two differ without a
+    // writer's session having produced the difference first.
+    await putDraft(doc.id, ['Publikovana cast textu.']);
+    await publishAs('bona', doc.id);
+    await putDraft(doc.id, ['Publikovana cast textu.', `rozpracovano-${Date.now()}`]);
+    await grantCarlRead(doc.id);
+
     await login(bona, 'bona');
     await login(other, 'carl');
-    await openDocument(bona, RUNBOOK_TITLE);
-    await openDocument(other, RUNBOOK_TITLE);
+    await openDocument(bona, doc.id);
+    await openDocument(other, doc.id);
 
     // The affordance, asserted because SPEC.md §2 asks for READ to be respected in
     // the UI too — but never asserted as the reason anything is safe.
@@ -241,15 +396,20 @@ test.describe('collaborative editing, two browsers', () => {
       'false',
     );
 
-    // A reader is shown the published text and not the draft. The seeded runbook has
-    // identical draft and published text, so a *writer* has to create the difference
-    // first — which is also the realistic case: someone else is mid-edit.
-    const unsaved = `rozpracovano-${Date.now()}`;
+    // What the reader was handed: the published version, not the draft sitting beside
+    // it. Asserted on text that exists only in the draft, so a reader's document that
+    // came from the room — which is what it used to — contains it and fails here.
+    const draftOnly = /rozpracovano-\d+/;
+    await expect(other.locator('[data-testid=editor-host]')).not.toContainText(draftOnly);
+    await expect(bona.locator('[data-testid=editor-host]')).toContainText(draftOnly);
+
+    // And live typing does not reach them either, one keystroke at a time.
+    const unsaved = `zivote-${Date.now()}`;
     await typeAtEnd(bona, unsaved);
     await expect(await ready(other)).not.toContainText(unsaved, { timeout: 5_000 });
 
-    // The enforcement. Carl's own page, Carl's own ticket, a frame built by hand and
-    // sent past every disabled button in his UI.
+    // The enforcement. Carl's own page, Carl's own ticket, a frame built inside the
+    // browser and sent past every disabled button in his UI.
     expect(await refused(other)).toBe(4403);
 
     // The same frame from a writer's page must NOT be refused, or the assertion above
@@ -258,10 +418,16 @@ test.describe('collaborative editing, two browsers', () => {
   });
 
   test('a remote cursor renders in the other browser', async () => {
+    const doc = await ownDoc('Caret');
+    // Content, deliberately. A freshly created document is `{doc, content: []}`, which
+    // Tiptap normalises to one empty paragraph — and a caret has no coordinates to
+    // render at inside it, so this test would fail for a reason that has nothing to do
+    // with awareness. Real documents have text; the caret needs somewhere to be.
+    await putDraft(doc.id, ['První odstavec.', 'Druhý odstavec.']);
     await login(bona, 'bona');
     await login(other, 'bona');
-    await openDocument(bona, RUNBOOK_TITLE);
-    await openDocument(other, RUNBOOK_TITLE);
+    await openDocument(bona, doc.id);
+    await openDocument(other, doc.id);
     await ready(bona);
     await ready(other);
 
@@ -279,23 +445,30 @@ test.describe('collaborative editing, two browsers', () => {
   });
 
   test('the save indicator settles, and typing then publishing snapshots the keystroke', async () => {
+    const doc = await ownDoc('Publish');
+    // Two blocks so the caret's destination is unambiguous, and a draft that exists
+    // before the page opens — the same shape a document reopened mid-edit has.
+    await putDraft(doc.id, ['První odstavec.']);
     await login(bona, 'bona');
-    await openDocument(bona, RUNBOOK_TITLE);
+    await openDocument(bona, doc.id);
 
     const marker = `publikace-${Date.now()}`;
     await typeAtEnd(bona, marker);
     await expect(bona.getByTestId('save-state')).toHaveText('Uloženo', { timeout: 20_000 });
 
+    // A document this test created has no history at all, so the version it gains is
+    // v1 and there is no earlier test's publishing to count against it. That is the
+    // point of owning the fixture: the arithmetic is this test's alone.
     const versions = bona.locator('.versions > li');
-    await expect(versions).toHaveCount(1, { timeout: 10_000 });
+    await expect(versions).toHaveCount(0, { timeout: 10_000 });
 
     await bona.getByTestId('publish').click();
-    await expect(versions).toHaveCount(2, { timeout: 15_000 });
+    await expect(versions).toHaveCount(1, { timeout: 15_000 });
 
     // The reason `flushNow` exists: persistence is debounced, so publishing without
     // the explicit flush would snapshot the document as of the last debounce window
-    // and lose this marker from an immutable version permanently. Open v2 and look.
-    await bona.locator('.versions button.num', { hasText: 'v2' }).click();
+    // and lose this marker from an immutable version permanently. Open v1 and look.
+    await bona.locator('.versions button.num', { hasText: 'v1' }).click();
     // The snapshot's own Markdown. Reading the version rather than the editor is the
     // point: the editor always shows the marker, so asserting there proves nothing.
     await expect(bona.locator('.snapshot')).toContainText(marker, { timeout: 10_000 });
@@ -309,20 +482,19 @@ test.describe('collaborative editing, two browsers', () => {
   });
 
   test('a new heading gets an anchor, and its deep link survives a reload', async () => {
+    const doc = await ownDoc('Anchory');
     await login(bona, 'bona');
-    await openDocument(bona, RUNBOOK_TITLE);
+    await openDocument(bona, doc.id);
 
     // Focus first. `ready()` waits for the indicator but does not move the caret,
     // and Control+End with focus on the page chrome leaves the cursor at the very
     // start of the document — where Enter then split the *seeded heading* and the
     // typed text landed inside it, which looked like an anchor bug and was a test bug.
-    const before = (await surface(bona).innerText()).length;
     await typeAtEnd(bona, ' ');
     await bona.keyboard.press('Enter');
     await bona.getByRole('button', { name: 'Nadpis' }).click();
     const headingText = `Nová sekce ${Date.now()}`;
     await bona.keyboard.type(headingText);
-    void before;
 
     const heading = surface(bona).locator('h2').last();
     await expect(heading).toHaveText(headingText);
@@ -355,44 +527,44 @@ test.describe('collaborative editing, two browsers', () => {
   });
 
   test('a cross-document reference shows the target after it is republished', async () => {
-    await login(bona, 'bona');
-    await openDocument(bona, RUNBOOK_TITLE);
+    // Two documents, because "cross-document" is the thing under test: a reference into
+    // the *same* document would pass with a resolver that simply re-read the local
+    // fragment, and it was the shape the first version of this test accidentally had.
+    const target = await ownDoc('Cil');
+    const viewer = await ownDoc('Odkazujici');
+    await putDraft(target.id, ['Cizí dokument.']);
+    await publishAs('bona', target.id);
 
-    // A reference from the runbook to the runbook's own seeded heading. Same resolve
-    // path as a cross-document one (the endpoint takes `document#anchor` and has no
-    // notion of who wrote what), and it keeps every fixture document writable — a
-    // reference into the HR handbook could be *rendered* by Bona but never
-    // republished by her, which is the half of SPEC §2.5 being tested here.
+    await login(bona, 'bona');
+    await login(other, 'bona');
+    await openDocument(bona, viewer.id);
+
     await typeAtEnd(bona, 'odkaz níže');
     await bona.getByTestId('insert-reference').click();
-    await bona.locator('input[aria-label="Cílový dokument"]').fill('deploy-runbook');
+    await bona.locator('input[aria-label="Cílový dokument"]').fill(target.slug);
     await bona.locator('input[aria-label="Cílový oddíl"]').fill('sec-1');
     await bona.getByRole('button', { name: 'Vložit' }).click();
 
     const reference = bona.locator('.doc-ref').first();
     await expect(reference).toHaveAttribute('data-resolved', 'ok', { timeout: 20_000 });
     await expect(reference).toContainText('Obsah');
-    // The version *number* is relative: these specs share one seeded database and
-    // other tests publish too, so this asserts "the version the reference names is
-    // the one it resolves from" and then that it moves — not a literal v1.
     const versionBefore = /v(\d+)$/.exec((await reference.getAttribute('title')) ?? '')?.[1];
     expect(versionBefore, 'the reference should name a version').toBeTruthy();
 
-    // Rename the target heading and publish, then reload. The reference must follow.
-    const target = surface(bona).locator('h1').first();
-    await target.click();
-    await bona.keyboard.press('Home');
-    await bona.keyboard.press('Shift+End');
-    await bona.keyboard.type('Obsah po publikovani');
-    await bona.getByTestId('publish').click();
-    await expect(bona.locator('.versions > li')).toHaveCount(2, { timeout: 15_000 });
+    // Rename the target's heading and publish it, from the second browser. The viewer
+    // is never touched, so the only way the new text can appear there is by resolving
+    // the target again — which is PLAN §2.5 in one sentence.
+    await openDocument(other, target.id);
+    const heading = (await ready(other)).locator('h1').first();
+    await heading.click();
+    await other.keyboard.press('Home');
+    await other.keyboard.press('Shift+End');
+    await other.keyboard.type('Obsah po publikovani');
+    await publishAs('bona', target.id);
 
-    await revisit(bona, bona.url());
+    await revisit(bona, `/d/${encodeURIComponent(viewer.id)}`);
     const after = bona.locator('.doc-ref').first();
     await expect(after).toHaveAttribute('data-resolved', 'ok', { timeout: 20_000 });
-    // PLAN §2.5: the target's *current published* content, never a stored copy. A
-    // node that cached text would still read "Obsah" here and the test would be
-    // asserting a snapshot, which is the thing §2.5 forbids.
     await expect(after).toContainText('Obsah po publikovani', { timeout: 20_000 });
     const versionAfter = /v(\d+)$/.exec((await after.getAttribute('title')) ?? '')?.[1];
     // It followed the target to a *newer* version rather than re-reading the old one.
