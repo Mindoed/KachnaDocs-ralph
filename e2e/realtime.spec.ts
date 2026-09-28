@@ -417,6 +417,50 @@ test.describe('collaborative editing, two browsers', () => {
     expect(await refused(bona)).not.toBe(4403);
   });
 
+  test('a reader learns about a publish and their view becomes the new version', async () => {
+    // SPEC.md §1: "Publikování … informuje ostatní klienty o změně." Phase 2 deferred
+    // this bullet to phase 3's transport; this is where it lands.
+    //
+    // Asserted in a browser because the interesting part is not "did the server say a
+    // new version exists" — it is what the reader's *document* ends up holding, and
+    // reconnecting is not enough to get it right. The provider keeps one Y.Doc across
+    // reconnects, so re-syncing a newer snapshot into a doc that already holds the
+    // older version merges them: heading twice, both paragraphs, both bodies. With the
+    // client-side rebuild removed this test fails as
+    // "Obsah publikace-dva-… Obsah publikace-jedna-…".
+    //
+    // Hence the second half of the assertion: the old text must be *gone*, not merely
+    // joined by new text. `toContainText(v2)` alone passes on a merged document.
+    const doc = await ownDoc('Naslouchani');
+    const v1 = `publikace-jedna-${Date.now()}`;
+    await putDraft(doc.id, [v1]);
+    await publishAs('bona', doc.id);
+    await grantCarlRead(doc.id);
+
+    await login(other, 'carl');
+    await openDocument(other, doc.id);
+    await expect(await ready(other)).toContainText(v1);
+
+    // A second version, published from Node so there is no doubt about ordering: the
+    // reader is connected and idle when it lands.
+    const v2 = `publikace-dva-${Date.now()}`;
+    await putDraft(doc.id, [v2]);
+    await publishAs('bona', doc.id);
+
+    // The poll runs every two seconds; the rebuild it triggers remounts the editor, so
+    // this waits on content rather than on `ready()` — whose reader label "Režim jen
+    // pro čtení" is true before the notification is even acted on.
+    const readerSurface = surface(other);
+    await expect(readerSurface).toContainText(v2, { timeout: 20_000 });
+    // The half that a "new content arrived" assertion would miss entirely: if the
+    // client had merged the new version into the doc it already had, v1 would still be
+    // on screen beside v2 and the line above would pass.
+    await expect(readerSurface).not.toContainText(v1);
+    const shown = await readerSurface.innerText();
+    expect(shown).toContain(v2);
+    expect(shown).not.toContain(v1);
+  });
+
   test('a remote cursor renders in the other browser', async () => {
     const doc = await ownDoc('Caret');
     // Content, deliberately. A freshly created document is `{doc, content: []}`, which

@@ -208,6 +208,15 @@ export interface RealtimeStatusDto {
   saved: boolean;
   /** Live connections; 0 means nobody else is in the room. */
   peers: number;
+  /**
+   * Newest published version number, or null if the document never was.
+   *
+   * The editor already polls this endpoint for the save indicator, so a change here
+   * is how a client learns that a publish happened while it was open — for a reader
+   * that means their view is stale, and replacing the document is the only correct
+   * response (merging a newer version into a Y.Doc holding an older one shows both).
+   */
+  publishedVersion: number | null;
 }
 
 /** Body of `POST /documents/:id/realtime-token`. */

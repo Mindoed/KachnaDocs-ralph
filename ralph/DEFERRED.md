@@ -48,13 +48,24 @@ Format: `phase — SPEC.md bullet — reason`
   Phase 2 stores `draft_body` (ProseMirror JSON) + `draft_markdown` instead, because the collaborative
   server arrives in phase 3. Publish reads from the same columns phase 3 will populate, so the snapshot
   path does not change when Yjs lands — only the writer does.
-- **2 — SPEC.md §1 "Očekávané chování": "Publikování … informuje ostatní klienty o změně"** — publishing
-  creates the version row (asserted) but pushes nothing to other clients, because there is no transport to
-  push over: the y-websocket server is phase 3, and PLAN.md §4 puts "publish→reader refresh" inside
-  Playwright's realtime scope for exactly that reason. Phase 2 ships the pull path — the history panel
-  refetches after a publish, and a reader's next request sees the new head. When the websocket lands, the
-  publish handler gains one broadcast; neither the snapshot nor the ACL path changes. This is the one
-  SPEC.md §1 bullet phase 2 does not satisfy, and the one it cannot satisfy without phase 3's infrastructure.
+- **2 — SPEC.md §1 "Očekávané chování": "Publikování … informuje ostatní klienty o změně"** — **closed by
+  phase 3**, on a different mechanism than assumed here, which is worth recording because the difference is
+  the reason the shipped design is not a broadcast. Phase 2 expected "the publish handler gains one
+  broadcast" over phase 3's websocket. What actually happens: `GET /documents/:id/realtime-status` carries
+  `publishedVersion`, the editor polls it every 2 s, and a reader who sees it advance rebuilds their editor
+  session (`EditorSession.vue` emits `republished`; `EditorPanel.vue` folds a nonce into the session `:key`).
+  Two things the broadcast assumption got wrong, both proven in `e2e/realtime.spec.ts`:
+  1. Pushing the new version into a connected reader's Y.Doc — which is what a broadcast means — _merges_
+     it beside the old one rather than replacing it. Yjs item ids are `(clientID, clock)` pairs assigned at
+     creation, so a second version's items are new content by construction and CRDT-merge cleanly next to
+     the first version's: heading twice, both bodies. The reader's document has to be *destroyed and
+     rebuilt*, which no server-side push can do for a client.
+  2. The rebuild is gated to `READ`. A writer's Y.Doc holds unsaved draft work by definition; replacing it
+     on a publish would discard whatever they typed since the last autosave. Writers learn about a publish
+     through the history panel they are holding (phase 2's pull path, unchanged).
+  Polling rather than a push on the websocket is the remaining compromise, and it is small: the notification
+  path reuses the endpoint the autosave indicator already polls, so a publish costs no new message type and
+  no new state on the room. A reader notices within 2 s instead of immediately.
 - **2 — the CMS tree renders Markdown, not styled ProseMirror output** — `VersionHistoryPanel` shows a
   snapshot's `markdown` in a `<pre>` plus its heading outline. Rendering the ProseMirror JSON is the
   editor's job (phase 3 owns Tiptap); a second, cheaper formatter here would mean two definitions of what a

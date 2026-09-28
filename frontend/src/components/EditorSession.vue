@@ -42,6 +42,27 @@ import { openDocument, route, scrollToAnchor } from '../editor/deepLink';
  */
 const props = defineProps<{ documentId: string; title: string | null; me: EditorIdentity | null }>();
 
+/**
+ * Asks the parent to rebuild this session from scratch.
+ *
+ * Emitted when a new version is published while a *reader* has the document open.
+ * Their view is a snapshot of one version, so the version changing means the snapshot
+ * is stale, and replacing it is the only correct response: their Y.Doc keeps the old
+ * version's items forever (reusing one doc across reconnects is deliberate), so a
+ * newer version served into it would merge and show both. The parent owns the `key`,
+ * because rebuilding means tearing down all six resources a session holds and
+ * re-mounting is the one way that ordering is guaranteed.
+ */
+const emit = defineEmits<{ (event: 'republished'): void }>();
+
+/**
+ * The published version this session's content came from; undefined until the first
+ * poll answers. Starting at `undefined` rather than `null` is what stops the mount-time
+ * poll from reporting the document's existing history as a change and rebuilding the
+ * session it is describing.
+ */
+let observedVersion: number | null | undefined;
+
 const cms = useCmsStore();
 const host = ref<HTMLElement | null>(null);
 const editor = shallowRef<Editor | null>(null);
@@ -124,6 +145,27 @@ async function pollStatus(): Promise<void> {
     const status = await api<RealtimeStatusDto>(`/documents/${props.documentId}/realtime-status`);
     saved.value = status.saved;
     saveError.value = null;
+
+    // A reader's whole view is a snapshot of one published version, so a new version
+    // makes everything on screen stale. Asking for a rebuild is the only honest
+    // response and it is gated on three things, each of which prevents a different
+    // kind of self-harm:
+    //
+    //  - READ only. A writer's Y.Doc holds the *draft*, including keystrokes the
+    //    debounce has not written yet; rebuilding their session would discard work
+    //    nobody asked to discard. A publish does not change what a writer is editing.
+    //  - a version actually observed first. Otherwise the mount-time poll reports the
+    //    document's pre-existing history as a change and rebuilds the session that is
+    //    still catching up on its first sync.
+    //  - an actual change in the number, not merely "not null".
+    const next = status.publishedVersion;
+    const isReader = realtime.permission.value === 'READ';
+    if (observedVersion !== undefined && isReader && next !== observedVersion) {
+      observedVersion = next;
+      emit('republished');
+      return;
+    }
+    observedVersion = next;
   } catch {
     // A failed poll says nothing about the draft, so it must not flip the label to
     // "Ukládání…" — that would assert unsaved changes on the strength of a network

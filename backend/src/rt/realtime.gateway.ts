@@ -643,8 +643,16 @@ export class RealtimeGateway implements OnModuleDestroy {
         // it would deliver unsaved text into a reader's document one keystroke at a
         // time, which is precisely what their ticket does not authorise — and doing it
         // via a peer update rather than a sync step 2 would make it look like ordinary
-        // collaboration on every wire capture from here on. A reader sees the newest
-        // published version and learns about a new one by reconnecting.
+        // collaboration on every wire capture from here on.
+        //
+        // So a reader's content changes only at connection time — and note that
+        // reconnecting is *not* sufficient on its own, tempting as that fix looks. The
+        // client keeps one Y.Doc across reconnects, so re-syncing a newer version into a
+        // doc holding the older one merges the two bodies rather than swapping them; that
+        // is the shape this file's snapshot design leaves behind, and it is why the reader
+        // in `e2e/realtime.spec.ts` is asserted to end up holding exactly one version.
+        // Replacing the document is the client's job: `EditorSession` notices
+        // `publishedVersion` advance on the status endpoint and asks for a new session.
         if (ws.view) continue;
         this.send(ws, (enc) => {
           encoding.writeVarUint(enc, RT_MESSAGE.sync);

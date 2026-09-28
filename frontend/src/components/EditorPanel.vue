@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { useCmsStore } from '../stores/cms';
 import { useAuthStore } from '../stores/auth';
 import EditorSession from './EditorSession.vue';
@@ -25,6 +25,20 @@ import { route } from '../editor/deepLink';
 const cms = useCmsStore();
 const auth = useAuthStore();
 
+/**
+ * Bumped to rebuild a session from scratch.
+ *
+ * The document id is only half of a session's identity: when a *reader* has a document
+ * open and somebody publishes, the content on screen is a snapshot of a version that
+ * no longer exists, and it cannot be updated in place — their Y.Doc holds the previous
+ * version's items permanently, so serving the new one merges and shows both. What is
+ * needed is a session with a brand-new Y.Doc, which is what a changed `:key` produces.
+ *
+ * Combined with the id rather than replacing it, so a document switch still rebuilds
+ * (the original reason for the key) and a republish rebuilds too.
+ */
+const sessionNonce = ref(0);
+
 // A deep link opens a document that the tree may not have selected yet, so the URL
 // is consulted before the selection: `/d/<id>` arrives on first paint, `cms.load()`
 // later, and reading only `selectedId` would show the empty state for a moment that
@@ -34,6 +48,14 @@ const documentId = computed(() => route.value.documentId ?? cms.selectedId);
 const document = computed(() => cms.documents.find((d) => d.id === documentId.value) ?? null);
 
 const me = computed(() => (auth.user ? { id: auth.user.id, displayName: auth.user.displayName } : null));
+
+function onRepublished(): void {
+  // The tree's idea of the version list is stale too, and this is the one place that
+  // knows a publish just happened; without it the reader's history panel would still
+  // name the old head after their document has been replaced with the new one.
+  void cms.load();
+  sessionNonce.value += 1;
+}
 </script>
 
 <template>
@@ -43,10 +65,11 @@ const me = computed(() => (auth.user ? { id: auth.user.id, displayName: auth.use
     </p>
     <EditorSession
       v-else
-      :key="documentId"
+      :key="`${documentId}:${sessionNonce}`"
       :document-id="documentId"
       :title="document?.title ?? null"
       :me="me"
+      @republished="onRepublished"
     />
   </div>
 </template>

@@ -715,3 +715,43 @@ read-only check (reader test goes red), the identity overwrite (`Received:
   and were one fixture gap.
 - Gate: `npm run verify` exit 0 — 23 unit + 142 backend e2e + 21 Playwright, no `.skip`, no
   `.only`, no skipped tests in the reporter output, tree clean.
+
+## Phase 3, iteration 7 — the reader's document, and the control that proved nothing (2026-09-28)
+
+- **Reconnecting is not the same as replacing, and that is the whole publish-notification
+  story.** SPEC.md §1's "Publikování … informuje ostatní klienty o změně" was deferred by
+  phase 2 on the assumption that phase 3's websocket would let the publish handler "gain one
+  broadcast". It cannot, and neither can a reconnect. A reader's provider keeps **one Y.Doc
+  across reconnects** (deliberately — a rebuilt doc mid-edit would lose state), so syncing a
+  newer published version into a doc that already holds the older one *merges* them: the
+  reader ends up with both headings and both bodies. Verified verbatim, with the client-side
+  fix removed, the reader's editor reading `Obsah publikace-dva-… Obsah publikace-jedna-…`.
+  The only fix is to destroy and rebuild the reader's editor session, which is a client-side
+  change and specifically *not* a server push. `GET /documents/:id/realtime-status` gained
+  `publishedVersion`; `EditorSession` polls it and emits `republished`; `EditorPanel` folds a
+  nonce into the session `:key`.
+- **The rebuild is gated to READ, and that gate is load-bearing.** A writer's Y.Doc holds
+  unsaved draft work *by definition* — that is what a draft is. A `republished`-triggered
+  rebuild on a WRITE connection would silently discard everything typed since the last
+  autosave, to fix a problem writers do not have (they are looking at the draft, which is
+  what they just published). Writers keep phase 2's pull path: the history panel refetches.
+- **`not.toContainText(v1)` is the assertion doing the work; `toContainText(v2)` alone is a
+  trap.** Merging produces a document containing the new version *and* the old one, so any
+  "the reader sees the new content" check passes on the broken behaviour. Every assertion
+  about a replaced document needs its negative half, or it cannot fail.
+- **My first negative control proved nothing, because it was run against a stale bundle.**
+  Playwright serves `frontend/dist` (`scripts/serve-e2e.mjs` refuses to boot without it); the
+  full gate rebuilds it in its `build` step, but a hand-run `npx playwright test -g …` does
+  not. So I disabled the `republished` emit, saw the test go red — and that red was the
+  *previous* bundle, from before the frontend change existed. Restoring the fix and re-running
+  gave a red too. Both results were measuring a frontend that did not contain either version of
+  the code. The control is only real after `npm run build -w frontend`: red with the mutation
+  built, green with the fix built, which is what the run ultimately showed. A negative control
+  that was never connected to the change is how you convince yourself a test works.
+- **Which half of the discard/flush split a publish takes matters to the client.** `POST
+  /versions` only `flushNow`s (the room survives, sockets stay open); `PUT /draft` and version
+  restore `discard` (sockets terminated, `y_state` cleared so the next connection re-seeds).
+  That is why the reader in the new test was *still connected* when v2 landed, and why its
+  merged view is a client bug rather than a stale-server one.
+- **`workers: 1` earns its keep.** With fixture ownership established last iteration, the new
+  publish test creates its own document and grants Carl READ on it, so it stays order-independent.

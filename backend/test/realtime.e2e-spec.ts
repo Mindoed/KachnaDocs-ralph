@@ -520,6 +520,15 @@ describe('a READ connection sees the published version, never the draft', () => 
     await Promise.all([reader.closed, writer.closed]);
   });
 
+  // What is deliberately NOT asserted here, and why: that a publish landing between a
+  // reader's connections leaves them holding one version rather than two. That test was
+  // written here and it fails, because a reader's client Y.Doc keeps the previous
+  // version's items forever and any newer version's items are new content by
+  // construction, so they merge in beside them — server-side, this is unwinnable. The
+  // reader's document has to be *rebuilt*, which only the client can do, so the case is
+  // asserted in a browser instead: see "a reader learns about a publish and their view
+  // becomes the new version" in `e2e/realtime.spec.ts`, and the mechanism's rationale in
+  // ralph/DEFERRED.md (phase 2, "informuje ostatní klienty o změně").
   it('serves the same published body again on a reconnect, without duplicating it', async () => {
     // A ticket lives 60 seconds and `useRealtime` rotates it by cycling the socket, so
     // this is not an edge case: every open reader reconnects about once a minute. The

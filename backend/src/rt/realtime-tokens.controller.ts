@@ -1,6 +1,7 @@
 import { Controller, Get, Param, Post } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import type { AuthUser, RealtimeStatusDto, RealtimeTicketDto } from '@kachnadocs/shared';
+import { query } from '../db';
 import { PermissionService } from '../acl/permission.service';
 import { RequirePermission } from '../acl/require-permission.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -51,10 +52,35 @@ export class RealtimeTokensController {
    * not a list — the presence *names* come over the websocket, which has its own
    * admission check.
    */
+  /**
+   * …and the newest published version, which is how a client learns that a publish
+   * happened while it was open.
+   *
+   * SPEC.md §1's "Publikování … informuje ostatní klienty o změně" is phase 2's
+   * deferral to this phase's transport, and it is answered here rather than by a
+   * pushed frame on purpose. A reader's view is a snapshot of a version; when that
+   * version changes, the only correct client action is to *replace* the document, and
+   * merging is the wrong action so obviously that a push frame would invite it. A
+   * changed number cannot be misread as an update to merge — and the editor already
+   * polls this endpoint for the save indicator, so this costs no new request.
+   *
+   * It cannot be fixed server-side instead: a reader's client Y.Doc keeps the previous
+   * version's items forever (reusing one doc across reconnects is deliberate), so any
+   * newer version's items merge in beside them and the reader sees both versions of
+   * every paragraph. Replacement has to happen where the Y.Doc lives.
+   */
   @Get(':id/realtime-status')
   @RequirePermission('READ', 'document')
-  status(@Param('id') id: string): RealtimeStatusDto {
-    return { documentId: id, ...this.realtime.persistence(id) };
+  async status(@Param('id') id: string): Promise<RealtimeStatusDto> {
+    const [row] = await query<{ number: number | null }>(
+      'SELECT max(number)::int AS number FROM document_versions WHERE document_id = $1',
+      [id],
+    );
+    return {
+      documentId: id,
+      publishedVersion: row?.number ?? null,
+      ...this.realtime.persistence(id),
+    };
   }
 
   @Post(':id/realtime-token')
