@@ -1,5 +1,7 @@
-# Ralph loop runtime state — per-session, must not be committed
-.claude/ralph-loop.local.md
+# Ralph loop runtime state — per-session, must not be committed.
+# Not anchored to the root: the loop runs from a workspace subdirectory too, and
+# an anchored pattern left backend/.claude/ untracked and committable.
+**/.claude/ralph-loop.local.md
 
 # Env and secrets
 .env

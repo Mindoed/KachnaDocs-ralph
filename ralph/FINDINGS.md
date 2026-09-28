@@ -358,3 +358,54 @@ phase rule is about the function bullets and this is not one — but a clause th
 is unmet should be written down as unmet regardless of which list it sits in.
 
 Gate: 13 unit + 98 over-HTTP + 12 browser, exit 0.
+
+## it.3 — a count that disclosed a hidden document
+
+`GET /groups` and `GET /categories` returned `documentCount` as a bare
+`count(*)` over every document in the group. Both list endpoints filtered the
+groups themselves through the ACL, so the filtering *looked* present, and the
+count subquery was simply never given the same treatment. Ana — HR role, so she
+inherits READ on Payroll, plus an explicit `NONE` on the one document there — saw
+her tree render "Payroll 1" above an empty set of Payroll rows. The group was
+legitimately visible to her and the document was not, so that digit told her a
+document exists that the API would answer 404 for. PLAN §3.3 is exactly about
+this, and the count is the same class of object as a row: an assertion that
+something exists.
+
+I did not find this by reading the SQL. I found it by printing the rendered tree
+out of a real browser in a throwaway `e2e/probe.spec.ts` and getting
+`.row.group [["▸HR1","0"],["▸Payroll1","1"]]`. The number was wrong on screen
+while every API assertion I had written was passing, because none of them
+compared a count to anything. Reading `groups.controller.ts` had not raised a
+doubt in it — the surrounding code is so thoroughly ACL-filtered that the one
+unfiltered expression read as part of the pattern rather than the exception. The
+PATCH path had a narrower version of the same thing: a group MANAGER who holds
+`NONE` on one document could read the stale count on a move.
+
+The guard test is deliberately awkward. Asserting one expected number ("Ana's
+Payroll count is 0") would only ever cover the pair I noticed, and the obvious
+way to compute an expected count — the same SQL, with `can_access_document`
+threaded through — would have agreed with the leak, because the leak *is* that
+expression's absence. So the test compares two independently filtered HTTP
+endpoints instead: every `documentCount` from `/groups` and `/categories`
+against what `/documents` actually lists for the same actor, collecting
+mismatches and asserting the list is empty. It holds for four actors and every
+group and category at once. Confirmed it fails without the fix:
+"group Payroll: count says 1, listing shows 0" and the same for the category.
+
+My first version of that test was wrong before it ever ran. I expected Bona's
+Payroll count to be 1 after moving a document into it; her `/documents` lists
+only the two Engineering documents she owns readable, because READ on a group is
+not READ on its whole subtree listing. The mistake was assuming a count and a
+listing answer the same question — which is the assumption that produced the bug
+in the first place. Written from the fixture rather than from reasoning about it.
+
+Also caught at compile time, twice over: I passed a message as a second argument
+to `expect(...)` (that is Playwright's signature, jest's `expect` takes none),
+and the negative-control run then showed a second wrong expectation — I checked
+"the document is really there and readable by someone" as Bona, who cannot read
+it; her grants are Engineering only. That precondition belongs to the database
+with no ACL in sight, since its whole job is to be a fact the filtered query
+could not fake.
+
+Gate: 13 unit + 103 over-HTTP + 13 browser, exit 0 on the committed tree.
