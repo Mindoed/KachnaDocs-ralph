@@ -673,3 +673,45 @@ read-only check (reader test goes red), the identity overwrite (`Received:
   pattern made grep exit non-zero, the chain short-circuited, and the run I believed I had
   made never started. Same class as the python-`replace` incident in the previous entry: the
   command that reports nothing did not do what was assumed.
+
+## Phase 3, iteration 6 — the shared fixture, and the day the suite proved its own assertions work (2026-09-28)
+
+- **Two Playwright files must not share seeded rows.** `workbench.spec.ts` asserts the runbook
+  has exactly 1 version and its draft-vs-published diff is `+0 / −0` (3 lines); the realtime
+  suite typed in that document and published it. `fullyParallel: false` only serialises tests
+  *inside* a file — two files still get two workers against the single `webServer` instance and
+  the single test database. Observed in both directions: presence chips 4≠2 (phase 2's editor
+  had joined the room) and the runbook diff 4≠3. The fix is **fixture ownership, not assertion
+  relaxation**: every document the realtime suite uses is now created by the test that uses it
+  (over the API, not SQL, so a fixture cannot take a shape the product cannot produce) and
+  deleted in `afterEach`. Only the seeded *users* are still shared.
+- **`workers: 1` makes fixture ownership mandatory, not optional.** Serialising the files
+  turned the intermittent collision into a *deterministic* one — with one worker, workbench
+  always reads the runbook after the realtime suite has typed in it. Order-independence was
+  then verified by running both files in both orders; the second order exposed the next bug.
+- **A test whose title says "different places" must put the writers in different places.**
+  The merge test pressed `Control+End` in *both* browsers, so both inserts landed at the same
+  offset and the merged text legitimately read `spolecny-…780 poznamka A0 poznamka B` — the
+  seed paragraph's own tail had been split by the other writer. Yjs guarantees *nothing is
+  lost*, not *the survivors stay contiguous*; the assertion had read a contiguity requirement
+  into a CRDT that makes a weaker, honest promise. It now puts one writer in each of two
+  paragraphs, which is both what the title claims and the case last-writer-wins actually
+  loses. Found only by running the files in the other order — flakiness was pointing at a real
+  over-specification the whole time.
+- **A newly created document is empty, and a caret needs coordinates.** `POST /documents`
+  inserts `{type:'doc',content:[]}`, which Tiptap normalises to a single empty paragraph; a
+  remote caret has no coordinates inside it and never renders. The test passed against the
+  seeded runbook because that has a heading and a paragraph. Restoring the content precondition
+  fixed the test — the awareness path was never broken.
+- **Both rewritten tests were re-proven against their bugs**, because the rewrite changed how
+  each one detects the leak and an unproven green assertion is a placeholder: restoring the
+  serve-draft-to-readers leak puts `rozpracovano-…` into the reader's document (red); never
+  forwarding updates leaves the second writer's note absent (red). The reader test now builds
+  its draft-vs-published difference *before anyone connects* (`PUT /draft` → publish →
+  `PUT /draft`), so the absence of the draft text in the reader's page can no longer be
+  explained by a websocket race or by the writer having produced the difference.
+- **A caret test and a save-state test both depend on content existing.** Same root cause as
+  above; worth stating because "Ukládám…" and "no caret" look like two unrelated realtime bugs
+  and were one fixture gap.
+- Gate: `npm run verify` exit 0 — 23 unit + 142 backend e2e + 21 Playwright, no `.skip`, no
+  `.only`, no skipped tests in the reporter output, tree clean.
