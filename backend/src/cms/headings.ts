@@ -64,7 +64,9 @@ function inlineOf(node: PmNode): string {
   const text = textOf(node);
   const kinds = new Set(
     (node.marks ?? [])
-      .map((mark) => (mark && typeof mark === 'object' && 'type' in mark ? String((mark as { type: unknown }).type) : ''))
+      .map((mark) =>
+        mark && typeof mark === 'object' && 'type' in mark ? String((mark as { type: unknown }).type) : '',
+      )
       .filter(Boolean),
   );
   // Order matters: `***x**y*` is not `**` plus `*` concatenated either way, so
@@ -75,7 +77,8 @@ function inlineOf(node: PmNode): string {
   if (kinds.has('italic')) out = `*${out}*`;
   if (kinds.has('strike')) out = `~~${out}~~`;
   const href = (node.marks ?? []).find(
-    (mark) => mark && typeof mark === 'object' && 'type' in mark && (mark as { type: unknown }).type === 'link',
+    (mark) =>
+      mark && typeof mark === 'object' && 'type' in mark && (mark as { type: unknown }).type === 'link',
   ) as { attrs?: Record<string, unknown> } | undefined;
   const target = asString(href?.attrs?.href);
   if (target) out = `[${out}](${target})`;
@@ -177,7 +180,9 @@ export function renderMarkdown(body: unknown): string {
 }
 
 function renderTable(table: PmNode): string {
-  const rows = (table.content ?? []).flatMap((row) => (row.type === 'tableRow' ? [row] : (row.content ?? [])));
+  const rows = (table.content ?? []).flatMap((row) =>
+    row.type === 'tableRow' ? [row] : (row.content ?? []),
+  );
   const cellsOf = (row: PmNode): string[] =>
     (row.content ?? []).map((cell) => inlineBlockOf(cell).replace(/\|/g, '\\|').replace(/\n+/g, ' '));
   const [header, ...rest] = rows;

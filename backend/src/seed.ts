@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { closePool, query, reconfigure } from './db';
 import { DevIdentityProvider } from './auth/dev-identity.provider';
+import { renderMarkdown } from './cms/headings';
 
 /**
  * Idempotent seed shared by dev and test. Fixed UUIDs so tests and FINDINGS can
@@ -53,8 +54,22 @@ function body(paragraphText: string): unknown {
   };
 }
 
+/**
+ * The stored Markdown projection, produced by the SAME renderer the realtime
+ * gateway runs on every autosave — not by hand.
+ *
+ * This used to be a literal template, and that was a latent bug: the seed wrote
+ * `...paragraph\n` with a trailing newline, while `renderMarkdown` emits none. The
+ * first time anyone opened a seeded document in the phase-3 editor, autosave would
+ * overwrite draft_markdown with the newline-free form, and the next version diff
+ * would report a change nobody made. Two definitions of "what a document looks
+ * like in Markdown" drifted the moment a second one appeared, which is the whole
+ * argument for renderMarkdown living in one file (see cms/headings.ts). Seeding
+ * through the real renderer makes the fixture and the live projection agree by
+ * construction rather than by me remembering to update both.
+ */
 function markdown(paragraphText: string): string {
-  return `# Obsah {data-anchor="sec-1"}\n\n${paragraphText}\n`;
+  return renderMarkdown(body(paragraphText));
 }
 
 export async function seed(): Promise<void> {

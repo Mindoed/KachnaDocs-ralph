@@ -9,19 +9,18 @@ import {
   encodeAwarenessUpdate,
   removeAwarenessStates,
 } from 'y-protocols/awareness';
-import {
-  readSyncMessage,
-  writeSyncStep1,
-  messageYjsSyncStep1,
-  messageYjsUpdate,
-} from 'y-protocols/sync';
+import { readSyncMessage, writeSyncStep1, messageYjsSyncStep1, messageYjsUpdate } from 'y-protocols/sync';
 import * as encoding from 'lib0/encoding';
 import * as decoding from 'lib0/decoding';
 import { RT_MESSAGE, type AwarenessUser } from '@kachnadocs/shared';
 import { query } from '../db';
 import { encodeYDoc, loadYDoc, seedYDocFromPmJson } from './draft-document';
-import type { RealtimeTickets } from './realtime-tickets';
-import type { DraftProjector } from './draft-projector';
+// Imported as values, not `import type`: emitDecoratorMetadata writes the
+// constructor parameter types into design:paramtypes from the *runtime* binding,
+// and a type-only import erases it — Nest then sees `Function` where it needed
+// RealtimeTickets and refuses to build the module at startup.
+import { DraftProjector } from './draft-projector';
+import { RealtimeTickets } from './realtime-tickets';
 
 /**
  * The y-websocket server (SPEC.md §2 realtime, PLAN §1).
@@ -102,6 +101,8 @@ interface Socket extends WebSocket {
   /** The Yjs client id this socket publishes awareness under, once it has sent any. */
   clientId?: number;
   alive?: boolean;
+  /** Set once admitted, so the close handler knows whether there is presence to remove. */
+  room?: Room;
 }
 
 interface Room {
@@ -112,6 +113,17 @@ interface Room {
   /** True when the stored draft is behind this room; drives the flush. */
   dirty: boolean;
   flush: ReturnType<typeof setTimeout> | null;
+  /**
+   * Presence ids that left the room and have not been announced yet.
+   *
+   * Needed because `encodeAwarenessUpdate` encodes one entry per id you name, so
+   * a client that has already been deleted from `states` cannot be described by
+   * the live set — the frame would simply not mention it, and a peer that never
+   * hears otherwise keeps drawing that caret forever. Naming the id with no state
+   * behind it is how y-protocols spells "gone": the receiver reads a null state at
+   * an unchanged clock and drops the entry. Cleared once broadcast.
+   */
+  gone: number[];
 }
 
 @Injectable()
@@ -192,42 +204,147 @@ export class RealtimeGateway implements OnModuleDestroy {
       room.flush = null;
       await this.writeRoom(room).catch(() => undefined);
     }
-    for (const room of this.rooms.values()) this.destroyRoom(room);
+    // Terminate before closing the server, not after. `WebSocketServer.close()`
+    // invokes its callback only once every connection is gone and it does not
+    // close them itself, so a single client that never hung up would make
+    // shutdown wait forever — which in a test run surfaces as a 60-second
+    // afterAll timeout pointing at nothing, and in production as a process that
+    // ignores SIGTERM while its replacement waits for the port.
+    for (const room of this.rooms.values()) {
+      for (const ws of room.sockets) ws.terminate();
+      room.sockets.clear();
+      this.destroyRoom(room);
+    }
     this.rooms.clear();
+    // A server that was never attached has no listening socket behind it and
+    // `close()` on it calls back synchronously, so no special case is needed.
     await new Promise<void>((resolve) => this.wss.close(() => resolve()));
   }
 
   // ---------------------------------------------------------------- connections
 
-  private async onConnection(conn: Socket, documentId: string, req: IncomingMessage): Promise<void> {
+  /**
+   * Admit a connection.
+   *
+   * ## Why the handlers go on before the credential is checked
+   *
+   * Verifying the ticket and loading the room both await — a JWT check and two
+   * queries. A real client sends its sync step 1 the moment the upgrade completes,
+   * which is during exactly that window, and `ws` does not buffer: a frame that
+   * arrives with no `message` listener attached is simply gone. Attaching the
+   * handlers after the authorisation awaits therefore produced a connection that
+   * was authorised, in the room, and permanently silent — it had asked for the
+   * document, the server had dropped the ask, and the client waited for a sync
+   * that would never come. The symptom is a browser that opens an empty editor
+   * until you reload the page.
+   *
+   * So frames are queued from the first instant and replayed only once the socket
+   * has been admitted. A connection that is refused never has a frame applied —
+   * the queue is dropped with it — which keeps the authorisation decision exactly
+   * where it was (before any bytes move in either direction) while making the
+   * admitted path lossless. That ordering is what makes `queued` safe rather than
+   * a place where an unauthenticated client's writes are lying in wait.
+   */
+  private onConnection(conn: Socket, documentId: string, req: IncomingMessage): void {
+    const queued: Buffer[] = [];
+    let admitted: { room: Room } | null = null;
+    let gone = false;
+
+    conn.on('pong', () => {
+      conn.alive = true;
+    });
+    conn.on('error', () => conn.close());
+    conn.on('close', () => {
+      gone = true;
+      const room = conn.room;
+      if (!room) return;
+      room.sockets.delete(conn);
+      // Only remove presence the socket actually published. A socket that never
+      // sent an awareness frame never claimed a client id, and removing an
+      // arbitrary id would delete somebody else's entry.
+      if (conn.clientId !== undefined) {
+        const leaving = conn.clientId;
+        conn.clientId = undefined;
+        // Recorded before the removal, because the removal is what triggers the
+        // broadcast and by then the id is no longer in `states` to be described.
+        // No separate broadcast: removeAwarenessStates emits the awareness update
+        // that carries this, so announcing it again would only duplicate a frame.
+        room.gone.push(leaving);
+        removeAwarenessStates(room.awareness, [leaving], null);
+      }
+      void this.releaseRoom(room);
+    });
+    conn.on('message', (data: RawData) => {
+      const buf = toBuffer(data);
+      if (admitted) this.onMessage(admitted.room, conn, buf);
+      else queued.push(buf);
+    });
+
+    void this.admit(conn, documentId, req).then((room) => {
+      if (!room) return; // already closed by admit, with the reason
+      if (gone) {
+        // The client hung up during the handshake. Nothing to attach it to, and
+        // the room the handshake just loaded is released by its own close path.
+        void this.releaseRoom(room);
+        return;
+      }
+      admitted = { room };
+      // Sync step 1 first, then awareness. A client that learns about peers before
+      // it has the document draws carets at offsets into an empty fragment, which is
+      // the "remote cursor jumps to the top every reconnect" symptom. The handshake
+      // reply goes out before the replay: the frames the client sent during the
+      // window are its *request* for state, and answering them is the point.
+      this.send(conn, (enc) => {
+        encoding.writeVarUint(enc, RT_MESSAGE.sync);
+        writeSyncStep1(enc, room.ydoc);
+      });
+      this.sendAwarenessTo(conn, room);
+      for (const buf of queued.splice(0, queued.length)) this.onMessage(room, conn, buf);
+    });
+  }
+
+  /**
+   * Check the credential and attach the socket to its room.
+   *
+   * Returns the room on success and `null` after closing the connection, so the
+   * caller cannot mistake a refusal for an empty room. Every failure closes
+   * identically, before a byte of content leaves: a missing ticket, an expired
+   * one, a session token passed instead, one minted for another document and a
+   * document that no longer exists all say "gone", because "does this document
+   * exist" is precisely what PLAN §3.3 refuses to answer.
+   *
+   * A rejection *after* the room was loaded also releases it. Loading a room for a
+   * caller we then turn away would otherwise leave a room with no sockets resident
+   * in the map — the release path is driven by a socket closing, and this socket
+   * never joined, so nothing else would ever clean it up. That is not only memory:
+   * a room held open keeps its document's live state out of the database, which is
+   * the exact staleness `releaseRoom` exists to prevent.
+   */
+  private async admit(conn: Socket, documentId: string, req: IncomingMessage): Promise<Room | null> {
     const ticket = readTicket(req);
     const claim = ticket ? await this.tickets.verify(ticket) : null;
-    // Missing, expired, a session token passed instead, or minted for another
-    // document: all closed identically, before a byte of content leaves. The close
-    // code says "re-authenticate", not which of those it was — "does this document
-    // exist" is exactly what PLAN §3.3 refuses to answer.
     if (!claim || claim.rt !== documentId) {
       conn.close(CLOSE.unauthorized, 'unauthorized');
-      return;
+      return null;
     }
 
     const room = await this.loadRoom(documentId);
-    // The room is gone (deleted mid-flight) or its row is not readable. Same
-    // close as the ticket failures, for the same reason.
     if (!room) {
       conn.close(CLOSE.notFound, 'not found');
-      return;
+      return null;
     }
 
-    const names = await query<{ display_name: string }>(
-      'SELECT display_name FROM users WHERE id = $1',
-      [claim.sub],
-    );
+    const refuse = (code: number, reason: string): null => {
+      conn.close(code, reason);
+      void this.releaseRoom(room);
+      return null;
+    };
+
+    const names = await query<{ display_name: string }>('SELECT display_name FROM users WHERE id = $1', [
+      claim.sub,
+    ]);
     const displayName = names[0]?.display_name;
-    if (!displayName) {
-      conn.close(CLOSE.unauthorized, 'unauthorized');
-      return;
-    }
+    if (!displayName) return refuse(CLOSE.unauthorized, 'unauthorized');
 
     conn.claims = claim;
     conn.user = {
@@ -238,35 +355,9 @@ export class RealtimeGateway implements OnModuleDestroy {
     };
     this.colourCursor += 1;
     conn.alive = true;
-
+    conn.room = room;
     room.sockets.add(conn);
-    conn.on('pong', () => {
-      conn.alive = true;
-    });
-    conn.on('message', (data: RawData) => {
-      this.onMessage(room, conn, toBuffer(data));
-    });
-    conn.on('close', () => {
-      room.sockets.delete(conn);
-      // Only remove presence the socket actually published. A socket that never
-      // sent an awareness frame never claimed a client id, and removing an
-      // arbitrary id would delete somebody else's entry.
-      if (conn.clientId !== undefined) {
-        removeAwarenessStates(room.awareness, [conn.clientId], null);
-      }
-      this.broadcastAwareness(room);
-      void this.releaseRoom(room);
-    });
-    conn.on('error', () => conn.close());
-
-    // Sync step 1 first, then awareness. A client that learns about peers before it
-    // has the document draws carets at offsets into an empty fragment, which is the
-    // "remote cursor jumps to the top every reconnect" symptom.
-    this.send(conn, (enc) => {
-      encoding.writeVarUint(enc, RT_MESSAGE.sync);
-      writeSyncStep1(enc, room.ydoc);
-    });
-    this.sendAwarenessTo(conn, room);
+    return room;
   }
 
   // --------------------------------------------------------------------- rooms
@@ -324,7 +415,15 @@ export class RealtimeGateway implements OnModuleDestroy {
     }
 
     const awareness = new Awareness(ydoc);
-    const room: Room = { documentId, ydoc, awareness, sockets: new Set(), dirty, flush: null };
+    const room: Room = {
+      documentId,
+      ydoc,
+      awareness,
+      sockets: new Set(),
+      dirty,
+      flush: null,
+      gone: [],
+    };
     this.rooms.set(documentId, room);
 
     ydoc.on('update', (update: Uint8Array, origin: unknown) => {
@@ -526,8 +625,22 @@ export class RealtimeGateway implements OnModuleDestroy {
     });
   }
 
+  /**
+   * Presence to everyone in the room: every live entry, plus any that have left
+   * since the last broadcast.
+   *
+   * Live entries are re-sent rather than only deltas. Awareness is clocked per
+   * client and a receiver ignores a frame whose clock it has already seen, so a
+   * full re-send is idempotent for them — and it means a peer that missed one
+   * frame (a flaky link, a reconnect) converges on the next one instead of
+   * holding a stale caret until it reloads. A single-person document is the common
+   * case and it costs one small frame.
+   */
   private broadcastAwareness(room: Room): void {
-    const clients = Array.from(room.awareness.getStates().keys());
+    const live = Array.from(room.awareness.getStates().keys());
+    const leaving = room.gone;
+    room.gone = [];
+    const clients = live.concat(leaving);
     if (clients.length === 0) return;
     const update = encodeAwarenessUpdate(room.awareness, clients, this.serverStates(room) as never);
     for (const ws of room.sockets) {

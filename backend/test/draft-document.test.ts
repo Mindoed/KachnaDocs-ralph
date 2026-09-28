@@ -85,7 +85,10 @@ describe('the server-side draft schema', () => {
         {
           type: 'bulletList',
           content: [
-            { type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'jedna' }] }] },
+            {
+              type: 'listItem',
+              content: [{ type: 'paragraph', content: [{ type: 'text', text: 'jedna' }] }],
+            },
           ],
         },
         {
@@ -221,7 +224,10 @@ describe('the Markdown projection', () => {
             {
               type: 'tableRow',
               content: [
-                { type: 'tableCell', content: [{ type: 'paragraph', content: [{ type: 'text', text: '1' }] }] },
+                {
+                  type: 'tableCell',
+                  content: [{ type: 'paragraph', content: [{ type: 'text', text: '1' }] }],
+                },
                 {
                   type: 'tableCell',
                   content: [{ type: 'paragraph', content: [{ type: 'text', text: 'a|b' }] }],
