@@ -767,3 +767,40 @@ SPEC.md §2 is now fully accounted for: every function bullet is implemented and
 and the one §1 bullet phase 2 deferred to this phase — "Publikování … informuje ostatní
 klienty o změně" — is closed above rather than deferred again, with the reason its
 assumed mechanism was wrong.
+
+## it.3 (this loop) — phase 2 re-verified, not re-implemented (2026-09-28)
+
+The loop prompt for this run is phase 2 with `completion_promise: "CMS DONE"`, at iteration 3, on a
+tree whose HEAD (`519fb7f`) is already past phase 2 and partway through phase 5. So the honest question
+was not "what do I build" but "is the promise true, and on which tree".
+
+**What was in the way, first:** uncommitted phase-5 work was in the tree — `backend/test/ai.e2e-spec.ts`
+(unrun, ~800 lines) and a behaviour-config change. Both are in the gate's path (lint, typecheck, jest),
+so `npm run verify` could not be measured at all until they moved. Stashed as
+`phase5 WIP: ai e2e suite + lazy behavior-config path` rather than committed: committing an untested
+suite under a phase-2 promise would put unverified assertions behind a green gate, which is the one
+thing the gate is for. The stash is restored after the measurement, so the WIP is not stranded in it —
+**and it is unverified: the green below does not cover it.**
+
+**Gate, on the clean committed tree (`519fb7f`):** exit **0** — 23 unit + 143 backend e2e + 22
+Playwright. Read out of the log for `VERIFY_EXIT=0`, not inferred from an exit code: an earlier
+iteration of this loop reported a green gate from a compound command that ended in `echo | tee` and
+therefore exited 0 whatever the tests did. That is now the habit.
+
+Mid-run I stated "gate is green" when the log was 1.5 KB in and still at typecheck. Caught by tailing
+it rather than trusting my own assumption. A verify that has not finished is not a verify that passed.
+
+**SPEC §1's ten function bullets, checked against the spec rather than against the earlier note in this
+file:** all ten are implemented (hierarchy display, document create/rename/move/archive/delete, draft vs
+published, publish, immutable snapshot, history with author+time+comment, open older + diff, restore as
+new draft, state badge, permission enforcement), and the five phase-2 gaps are in `ralph/DEFERRED.md`
+each with a reason — one of which (`"informuje ostatní klienty"`) was closed by phase 3 on a different
+mechanism than phase 2 assumed, which is itself recorded there. So the promise's second condition holds
+on the current tree, not on the strength of a note written three phases ago.
+
+**One correction to a claim in this file's phase-2 section:** `NONE` was deferred in phase 1 as "not
+selectable in the grant editor" and is now implemented — `e2e/workbench.spec.ts:264` drives it end to
+end ("NONE is reachable in the grant editor and renders as a denial"). The DEFERRED entry is
+stale-but-true-as-written (it describes phase 1's state and points the fix at phase 2, where it
+landed). Left in place rather than edited, per the append-only rule; noted here so nobody reads the
+absence of `NONE` in the UI as still-open work.
