@@ -151,8 +151,9 @@ export class BehaviorConfigService {
 
     for (const line of raw.split(/\r?\n/)) {
       const match = SETTING.exec(line);
-      if (match) {
-        settings[match[1]] = match[2].trim().replace(/^["']|["']$/g, '');
+      const key = match?.[1];
+      if (key !== undefined) {
+        settings[key] = (match?.[2] ?? '').trim().replace(/^["']|["']$/g, '');
         continue;
       }
       // A bullet that isn't a setting is prose ("always cite the section"), and a

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Logger, Param, Post, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import type { AuthUser } from '@kachnadocs/shared';
 import { diffLines, summarize } from './diff';
@@ -71,6 +71,8 @@ export function extractHeadings(body: unknown): Array<{ anchor: string; level: n
 @ApiTags('documents')
 @Controller('documents')
 export class VersionsController {
+  private readonly logger = new Logger(VersionsController.name);
+
   constructor(
     private readonly permissions: PermissionService,
     // Resolved across modules: RealtimeModule exports the gateway and AppModule
@@ -145,6 +147,27 @@ export class VersionsController {
       await client.query(`UPDATE documents SET state = 'Published', updated_at = now() WHERE id = $1`, [id]);
       return number;
     });
+
+    // Indexing the new version, *after* the transaction commits — never inside it.
+    // `reindexDocument` reads the newest version through its own connection, so run
+    // from within this transaction it would not see the snapshot being committed and
+    // would index the *previous* version: chunks labelled with a version number they
+    // were not cut from, which the one-version-per-document trigger cannot catch
+    // because it is a single clean version, just the wrong one.
+    //
+    // A failure here is logged and swallowed, deliberately. The version is already
+    // committed and immutable, and the migration's newest-version predicate means an
+    // unindexed document is simply *absent* from answers — the safe degradation, not
+    // an answer built from superseded text. Answering 500 instead would report a
+    // publish as failed when it succeeded, and a retry would create a second
+    // immutable version to republish identical content.
+    try {
+      await this.retrieval.reindexDocument(id);
+    } catch (err) {
+      this.logger.warn(
+        `published v${published} of ${id} but its retrieval index failed: ${(err as Error).message}`,
+      );
+    }
     return { published: true, version: published };
   }
 

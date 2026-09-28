@@ -2,6 +2,8 @@ import 'reflect-metadata';
 import { closePool, query, reconfigure } from './db';
 import { DevIdentityProvider } from './auth/dev-identity.provider';
 import { renderMarkdown } from './cms/headings';
+import { HashingEmbeddingProvider } from './ai/embedding.provider';
+import { reindexDocument } from './ai/retrieval.service';
 
 /**
  * Idempotent seed shared by dev and test. Fixed UUIDs so tests and FINDINGS can
@@ -72,6 +74,19 @@ function markdown(paragraphText: string): string {
   return renderMarkdown(body(paragraphText));
 }
 
+/**
+ * The embedder the seed indexes with.
+ *
+ * A module-level instance rather than one per document because it is stateless and
+ * allocating one per publish is noise. It has to be the *same provider* the running
+ * app is bound to in `ai.module.ts`, or seeded vectors and query vectors would live
+ * in different spaces and every seeded document would retrieve nothing. That is safe
+ * today because `HashingEmbeddingProvider` is deterministic — no training, no
+ * version drift — and it is the reason a real embedding provider would have to make
+ * the same guarantee or force a full reindex on change.
+ */
+const embeddings = new HashingEmbeddingProvider();
+
 export async function seed(): Promise<void> {
   const f = FIXTURES;
 
@@ -80,7 +95,7 @@ export async function seed(): Promise<void> {
   // prove. Seed data only — never call this against anything you care about.
   await query(
     `TRUNCATE permissions, documents, groups, user_discord_roles, discord_roles, users,
-       categories, document_versions, headings
+       categories, document_versions, headings, document_chunks, ai_messages, ai_conversations
        RESTART IDENTITY CASCADE`,
   );
 
@@ -233,6 +248,18 @@ export async function seed(): Promise<void> {
       'sec-1',
       'Obsah',
     ]);
+    // Index what was just published, through the same function a publish calls.
+    //
+    // The seed writes version rows with raw SQL and never boots a Nest application,
+    // so the controller's reindex hook does not run here — and a seeded corpus that
+    // is not indexed is the worst possible shape of green for the AI suite. Every
+    // question would retrieve nothing, every answer would be the honest "the
+    // documentation does not cover that", and a test asserting that answer would
+    // pass. A refusal is a valid answer, so only the *positive* retrieval tests would
+    // notice, and they would fail confusingly. Indexing in the seed keeps "published"
+    // and "answerable" meaning the same thing in a fresh database as they do in a
+    // live one, which is what the phase's ACL test needs to have something to exclude.
+    await reindexDocument(embeddings, d.id);
   }
 
   // Grants. One statement each: the multi-row form needs N x 5 placeholders

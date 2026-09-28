@@ -96,7 +96,7 @@ export async function reindexDocument(embeddings: EmbeddingProvider, documentId:
           chunk.anchor,
           chunk.heading,
           chunk.text,
-          vectorToSqlLiteral(vectors[index]),
+          vectorToSqlLiteral(vectors[index] ?? []),
         ],
       );
     }
@@ -121,6 +121,7 @@ export class RetrievalService {
    */
   async search(actorId: string, question: string, limit = 5): Promise<RetrievedChunk[]> {
     const [vector] = this.embeddings.embed([question]);
+    if (!vector) throw new Error('embedding provider returned no vector for a single input');
     return this.searchByVector(actorId, vector, limit);
   }
 
@@ -144,7 +145,11 @@ export class RetrievalService {
       heading: string;
       chunk_text: string;
       distance: number;
-    }>(`SELECT * FROM ai_search_chunks($1, $2::${HALFVEC}, $3)`, [actorId, vectorToSqlLiteral(vector), limit]);
+    }>(`SELECT * FROM ai_search_chunks($1, $2::${HALFVEC}, $3)`, [
+      actorId,
+      vectorToSqlLiteral(vector),
+      limit,
+    ]);
     return rows.map((row) => ({
       chunkId: row.chunk_id,
       documentId: row.document_id,

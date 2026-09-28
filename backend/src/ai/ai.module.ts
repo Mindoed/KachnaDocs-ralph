@@ -2,11 +2,7 @@ import { Module } from '@nestjs/common';
 import { AiController } from './ai.controller';
 import { BehaviorConfigService } from './behavior-config.service';
 import { ChatService, GENERATION_PROVIDER } from './chat.service';
-import {
-  EMBEDDING_PROVIDER,
-  HashingEmbeddingProvider,
-  type EmbeddingProvider,
-} from './embedding.provider';
+import { EMBEDDING_PROVIDER, HashingEmbeddingProvider, type EmbeddingProvider } from './embedding.provider';
 import { StubProvider, type GenerationProvider } from './generation.provider';
 import { RetrievalService } from './retrieval.service';
 

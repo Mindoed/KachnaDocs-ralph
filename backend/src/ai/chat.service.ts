@@ -225,7 +225,8 @@ export class ChatService {
       ord: row.ord,
       role: row.role === 'assistant' ? 'assistant' : 'user',
       text: row.text,
-      citations: typeof row.citations === 'string' ? (JSON.parse(row.citations) as Citation[]) : row.citations,
+      citations:
+        typeof row.citations === 'string' ? (JSON.parse(row.citations) as Citation[]) : row.citations,
       createdAt: row.created_at.toISOString(),
     }));
   }
@@ -247,7 +248,10 @@ export class ChatService {
    * "does not exist" alike, so the caller's 404 cannot be told apart — the rule
    * `notFound()` exists to keep, applied here to conversation ids.
    */
-  async conversationOf(conversationId: string, actorId: string): Promise<{ id: string; title: string; updatedAt: string } | null> {
+  async conversationOf(
+    conversationId: string,
+    actorId: string,
+  ): Promise<{ id: string; title: string; updatedAt: string } | null> {
     const rows = await query<{ id: string; title: string; updated_at: Date }>(
       'SELECT id, title, updated_at FROM ai_conversations WHERE id = $1 AND user_id = $2',
       [conversationId, actorId],
@@ -304,7 +308,8 @@ export class ChatService {
 
 function lastUserTurn(history: readonly ChatMessage[]): string | null {
   for (let i = history.length - 1; i >= 0; i -= 1) {
-    if (history[i].role === 'user') return history[i].text;
+    const turn = history[i];
+    if (turn?.role === 'user') return turn.text;
   }
   return null;
 }
@@ -314,4 +319,3 @@ function titleFrom(question: string): string {
   const flat = question.replace(/\s+/g, ' ').trim();
   return flat.length > 60 ? `${flat.slice(0, 59)}…` : flat;
 }
-

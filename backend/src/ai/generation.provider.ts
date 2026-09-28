@@ -134,7 +134,8 @@ export class StubProvider implements GenerationProvider {
 /** The most recent user turn, or null if the conversation has none yet. */
 function lastQuestion(history: readonly { role: 'user' | 'assistant'; text: string }[]): string | null {
   for (let i = history.length - 1; i >= 0; i -= 1) {
-    if (history[i].role === 'user') return history[i].text.trim();
+    const turn = history[i];
+    if (turn?.role === 'user') return turn.text.trim();
   }
   return null;
 }

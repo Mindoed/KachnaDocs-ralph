@@ -174,8 +174,8 @@ function piecesOf(blocks: string[], maxChars: number, minChars: number): string[
   if (pieces.length < 2) return pieces;
   // Fold a runt leading piece into the next one. Only the head needs this: a
   // short tail already has a neighbour to its left and is a real short section.
-  if (pieces[0].length < minChars) {
-    const [head, next, ...rest] = pieces;
+  const [head, next, ...rest] = pieces;
+  if ((head?.length ?? 0) < minChars && next !== undefined) {
     return [`${head} ${next}`, ...rest];
   }
   return pieces;

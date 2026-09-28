@@ -111,7 +111,7 @@ export class HashingEmbeddingProvider implements EmbeddingProvider {
       // A different bit decides the sign, so bucket and sign are not correlated
       // through the low bits of the same value.
       const sign = (hash >>> 16) & 1 ? 1 : -1;
-      vector[bucket] += sign;
+      vector[bucket] = (vector[bucket] ?? 0) + sign;
     }
 
     const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
@@ -140,6 +140,6 @@ export function vectorToSqlLiteral(vector: readonly number[]): string {
  */
 export function cosineSimilarity(a: readonly number[], b: readonly number[]): number {
   let dot = 0;
-  for (let i = 0; i < a.length; i += 1) dot += a[i] * b[i];
+  for (let i = 0; i < a.length; i += 1) dot += (a[i] ?? 0) * (b[i] ?? 0);
   return dot;
 }
