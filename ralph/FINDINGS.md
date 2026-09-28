@@ -755,3 +755,15 @@ read-only check (reader test goes red), the identity overwrite (`Received:
   merged view is a client bug rather than a stale-server one.
 - **`workers: 1` earns its keep.** With fixture ownership established last iteration, the new
   publish test creates its own document and grants Carl READ on it, so it stays order-independent.
+
+### Gate, on the committed tree (`7f0581c`)
+
+`npm run verify` exit **0**: 23 unit + 143 backend e2e + 22 Playwright, no `.skip`, no
+`.only`, no skipped tests in the reporter output, working tree clean afterwards. The two
+new tests since the last gate are the reader-doubling one (jest) and the publish-
+notification one (Playwright), which is why the counts moved 142→143 and 21→22.
+
+SPEC.md §2 is now fully accounted for: every function bullet is implemented and asserted,
+and the one §1 bullet phase 2 deferred to this phase — "Publikování … informuje ostatní
+klienty o změně" — is closed above rather than deferred again, with the reason its
+assumed mechanism was wrong.
