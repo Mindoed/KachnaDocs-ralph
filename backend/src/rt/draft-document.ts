@@ -8,7 +8,11 @@ import { Image } from '@tiptap/extension-image';
 import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table';
 import { TaskList } from '@tiptap/extension-task-list';
 import { TaskItem } from '@tiptap/extension-task-item';
-import { prosemirrorJSONToYDoc, yXmlFragmentToProsemirrorJSON } from '@tiptap/y-tiptap';
+import {
+  prosemirrorJSONToYDoc,
+  prosemirrorJSONToYXmlFragment,
+  yXmlFragmentToProsemirrorJSON,
+} from '@tiptap/y-tiptap';
 import { RT_FRAGMENT } from '@kachnadocs/shared';
 
 /**
@@ -96,8 +100,49 @@ export function draftSchema(): Schema {
  * `y_state IS NULL` inside the same transaction that writes the result, so two
  * simultaneous first-opens cannot both seed.
  */
-export function seedYDocFromPmJson(body: unknown): Y.Doc {
-  return prosemirrorJSONToYDoc(draftSchema(), body, RT_FRAGMENT);
+export function seedYDocFromPmJson(body: unknown, clientID?: number): Y.Doc {
+  if (clientID === undefined) return prosemirrorJSONToYDoc(draftSchema(), body, RT_FRAGMENT);
+  // A deterministic client id makes the *resulting Yjs items* deterministic, because
+  // item ids are (clientID, clock) pairs assigned at creation — setting it afterwards
+  // is too late, so this has to seed into a fragment the caller's doc owns rather than
+  // letting `prosemirrorJSONToYDoc` build the doc itself.
+  //
+  // Used only for a reader's per-connection snapshot; the draft path must keep its
+  // random id, since two writers seeding the same `draft_body` must not collide.
+  const ydoc = new Y.Doc();
+  ydoc.clientID = clientID;
+  prosemirrorJSONToYXmlFragment(draftSchema(), body, ydoc.getXmlFragment(RT_FRAGMENT));
+  return ydoc;
+}
+
+/**
+ * A stable 32-bit id for one published version of one document.
+ *
+ * A reader's snapshot is rebuilt from the newest published version on *every*
+ * connection, and a ticket rotates about once a minute — so the same version is
+ * served into the same client Y.Doc repeatedly. With a random id each time, the
+ * second serving is indistinguishable from genuinely new content and the merge
+ * keeps both copies: the reader's document grows a second heading and a second
+ * paragraph, once a minute, forever. Derived from the document and the version
+ * number, an unchanged version produces byte-identical items and re-applying it is
+ * a no-op; a new publish changes the id, and the new items merge in beside the old
+ * ones — which is the correct outcome, since the previous version's content really
+ * has been replaced.
+ *
+ * FNV-1a rather than a counter or a hash module: it is five lines, collision
+ * resistance is irrelevant here (a collision means two versions share item ids, and
+ * the worst case is that a reader sees one version where they should have seen the
+ * other — never a cross-document leak, since item ids are namespaced by the
+ * fragment they live in), and the input is two ids we already have.
+ */
+export function snapshotClientId(documentId: string, version: number): number {
+  let hash = 0x811c9dc5;
+  const input = `${documentId}@${version}`;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
 }
 
 /** The draft as ProseMirror JSON. No schema: the fragment carries type names. */

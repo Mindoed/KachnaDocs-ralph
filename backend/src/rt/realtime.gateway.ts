@@ -14,7 +14,7 @@ import * as encoding from 'lib0/encoding';
 import * as decoding from 'lib0/decoding';
 import { RT_MESSAGE, type AwarenessUser } from '@kachnadocs/shared';
 import { query } from '../db';
-import { encodeYDoc, loadYDoc, seedYDocFromPmJson } from './draft-document';
+import { encodeYDoc, loadYDoc, seedYDocFromPmJson, snapshotClientId } from './draft-document';
 // Imported as values, not `import type`: emitDecoratorMetadata writes the
 // constructor parameter types into design:paramtypes from the *runtime* binding,
 // and a type-only import erases it — Nest then sees `Function` where it needed
@@ -530,8 +530,8 @@ export class RealtimeGateway implements OnModuleDestroy {
    * minting route, and this query cannot widen what that decided.
    */
   private async snapshotDoc(documentId: string, userId: string): Promise<Y.Doc | null> {
-    const rows = await query<{ body: unknown }>(
-      `SELECT v.body
+    const rows = await query<{ body: unknown; number: number }>(
+      `SELECT v.body, v.number
          FROM document_versions v
          JOIN documents d ON d.id = v.document_id
         WHERE v.document_id = $1
@@ -544,7 +544,14 @@ export class RealtimeGateway implements OnModuleDestroy {
     // close a nonexistent document gets: "not published yet" and "not yours" stay
     // indistinguishable on the wire (PLAN §3.3).
     if (!row) return null;
-    return seedYDocFromPmJson(row.body ?? { type: 'doc', content: [] });
+    // Seeded under the version's own client id. Without that, the snapshot served
+    // after a ticket rotation is indistinguishable from new content and *merges* into
+    // the reader's document, which already holds the previous serving — so an open
+    // reader's document doubles itself once a minute. See `snapshotClientId`.
+    return seedYDocFromPmJson(
+      row.body ?? { type: 'doc', content: [] },
+      snapshotClientId(documentId, row.number),
+    );
   }
 
   /**

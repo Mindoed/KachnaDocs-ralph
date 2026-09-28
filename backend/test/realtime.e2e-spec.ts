@@ -102,9 +102,19 @@ async function mintToken(documentId: string, token: string): Promise<string> {
  * and never send, because the interesting part of a denial is what the server
  * does to a connection that has done nothing wrong yet.
  */
-async function connect(documentId: string, ticket: string, options: { quiet?: boolean } = {}): Promise<Peer> {
-  const ydoc = new Y.Doc();
-  const awareness = new Awareness(ydoc);
+async function connect(
+  documentId: string,
+  ticket: string,
+  options: { quiet?: boolean; ydoc?: Y.Doc; awareness?: Awareness } = {},
+): Promise<Peer> {
+  // Passing a doc in is how a test reuses one across connections, which is what a
+  // browser does on every ticket rotation. A fresh `Y.Doc` per connection would model
+  // a page reload instead, and the two cases differ in the way that matters: applying
+  // the whole document again to a doc that already holds it *merges* rather than
+  // replaces, so a server that hands out a new snapshot under a new client id
+  // duplicates the content and a test with a fresh doc per connect cannot see it.
+  const ydoc = options.ydoc ?? new Y.Doc();
+  const awareness = options.awareness ?? new Awareness(ydoc);
   const socket = new WebSocket(`${wsOrigin()}/api/realtime/${documentId}?ticket=${ticket}`);
   const peer: Peer = {
     socket,
@@ -125,8 +135,10 @@ async function connect(documentId: string, ticket: string, options: { quiet?: bo
       // reported no failures. Destroying both sides is what a real client does
       // when you close the tab.
       if (socket.readyState === WebSocket.OPEN) socket.close();
-      awareness.destroy();
-      ydoc.destroy();
+      // Only what this helper created. A caller that handed in a doc keeps it, or the
+      // second connection would be against a destroyed document.
+      if (!options.ydoc) ydoc.destroy();
+      if (!options.awareness) awareness.destroy();
     },
   };
   livePeers.push(peer);
@@ -506,6 +518,50 @@ describe('a READ connection sees the published version, never the draft', () => 
     reader.socket.close();
     writer.socket.close();
     await Promise.all([reader.closed, writer.closed]);
+  });
+
+  it('serves the same published body again on a reconnect, without duplicating it', async () => {
+    // A ticket lives 60 seconds and `useRealtime` rotates it by cycling the socket, so
+    // this is not an edge case: every open reader reconnects about once a minute. The
+    // client keeps *one* Y.Doc across those cycles on purpose (a rebuilt doc is how a
+    // document starts losing paragraphs), which means the server's next sync step 2 is
+    // merged into a document that already holds the whole published body.
+    //
+    // Merging is the hazard. A snapshot built under a fresh Yjs client id looks like a
+    // brand-new copy of every element rather than a restatement of the old one, so the
+    // merge keeps both and the reader's document grows a second heading and a second
+    // paragraph — once a minute, forever. Asserting on the *count* of the marker is
+    // what sees it: an assertion that the text "is still there" passes either way.
+    const carl = await loginAs('carl');
+    const ydoc = new Y.Doc();
+    const awareness = new Awareness(ydoc);
+    try {
+      const first = await connect(RUNBOOK, await mintToken(RUNBOOK, carl), { ydoc, awareness });
+      await waitFor(() => receivedText(first).includes(PUBLISHED_MARKER), 'the published body');
+      const afterFirst = receivedText(first);
+      first.socket.close();
+      await first.closed;
+
+      const second = await connect(RUNBOOK, await mintToken(RUNBOOK, carl), { ydoc, awareness });
+      // Give the second sync every chance to land before measuring, then wait one more
+      // round-trip: the failure mode is an *extra* copy arriving late, so "it looked
+      // right immediately" proves nothing.
+      await waitFor(() => receivedText(second).includes(PUBLISHED_MARKER), 'the second sync');
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      const afterSecond = receivedText(second);
+      const countOf = (text: string): number => text.split(PUBLISHED_MARKER).length - 1;
+      // The count first and on its own: on a duplicate the whole-string comparison
+      // below says "these two long strings differ", which makes the reader work out
+      // how. This one says "it arrived twice".
+      expect(countOf(afterSecond)).toBe(countOf(afterFirst));
+      expect(afterSecond).toBe(afterFirst);
+      second.socket.close();
+      await second.closed;
+    } finally {
+      awareness.destroy();
+      ydoc.destroy();
+    }
   });
 
   it('refuses a reader a document that has never been published, indistinguishably', async () => {
