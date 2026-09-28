@@ -13,10 +13,11 @@ import { CategoriesController } from './cms/categories.controller';
 import { VersionsController } from './cms/versions.controller';
 import { ReferencesController } from './cms/references.controller';
 import { RealtimeModule } from './rt/realtime.module';
+import { AiModule } from './ai/ai.module';
 import { HealthController } from './health.controller';
 
 @Module({
-  imports: [JwtModule.register(buildJwtOptions()), AclModule, RealtimeModule],
+  imports: [JwtModule.register(buildJwtOptions()), AclModule, RealtimeModule, AiModule],
   // HealthController is unauthenticated by design: a probe that needs a token
   // cannot answer "why is the API down".
   controllers: [

@@ -322,3 +322,70 @@ export interface ApiErrorBody {
     details?: unknown;
   };
 }
+
+// --------------------------------------------------------------------------- AI
+// Phase 5's wire types. The citation shape is shared rather than backend-local
+// because the frontend has to *link* with it: a citation the client cannot render
+// as a link to document + anchor is not the citation SPEC §5 asks for, and a type
+// only the server can see is how that drift becomes invisible until a user hits it.
+
+/** One source an answer is built from, linking to a document and its heading. */
+export interface AiCitationDto {
+  documentId: string;
+  documentTitle: string;
+  versionNumber: number;
+  /** Heading anchor, or null when the source is the document as a whole. */
+  anchor: string | null;
+  heading: string;
+  /** The passage quoted into the answer. */
+  excerpt: string;
+  /** Similarity to the question, 0..1; shown so a weak match can be seen as one. */
+  score: number;
+}
+
+/** One stored turn of a conversation. */
+export interface AiMessageDto {
+  id: string;
+  ord: number;
+  role: 'user' | 'assistant';
+  text: string;
+  /** Empty on a user turn; citations belong to the answer that chose them. */
+  citations: AiCitationDto[];
+  createdAt: string;
+}
+
+export interface AiAnswerDto {
+  conversationId: string;
+  messageId: string;
+  question: string;
+  answer: string;
+  citations: AiCitationDto[];
+  /** True when the answer rests on an earlier turn rather than this question alone. */
+  usedConversationContext: boolean;
+  /** True when nothing cleared the retrieval score threshold — the "not covered" answer. */
+  unanswerable: boolean;
+  provider: { embedding: string; generation: string; behaviorConfig: string };
+}
+
+export interface AiConversationDto {
+  id: string;
+  title: string;
+  updatedAt: string;
+}
+
+/**
+ * A conversation with its history, oldest turn first.
+ *
+ * Flat turns rather than question/answer pairs: the stored history is the truth,
+ * and a read model that pairs rows would have to invent a pair for a turn that
+ * was interrupted before its answer was written.
+ */
+export interface AiConversationDetailDto extends AiConversationDto {
+  messages: AiMessageDto[];
+}
+
+/** Body of `POST /ai/ask`. `conversationId` absent starts a new conversation. */
+export interface AskRequestDto {
+  question: string;
+  conversationId?: string;
+}

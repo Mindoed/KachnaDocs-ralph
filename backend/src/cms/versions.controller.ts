@@ -5,6 +5,7 @@ import { diffLines, summarize } from './diff';
 import { PermissionService } from '../acl/permission.service';
 import { RequirePermission } from '../acl/require-permission.guard';
 import { RealtimeGateway } from '../rt/realtime.gateway';
+import { RetrievalService } from '../ai/retrieval.service';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { query, withTransaction } from '../db';
 import { notFound, validationFailed } from '../http-errors';
@@ -76,6 +77,9 @@ export class VersionsController {
     // imports it, which is how a CMS controller reaches the websocket layer
     // without the CMS code owning any of it.
     private readonly realtime: RealtimeGateway,
+    // AiModule exports it for exactly this: a publish has to reindex, and the CMS
+    // should not know how retrieval works.
+    private readonly retrieval: RetrievalService,
   ) {}
 
   /**
