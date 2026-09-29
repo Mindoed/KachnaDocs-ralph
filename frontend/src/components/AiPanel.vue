@@ -212,7 +212,7 @@ onMounted(async () => {
       </span>
     </div>
 
-    <details v-if="conversations.length > 0" class="history">
+    <details v-if="conversations.length > 0" class="conversations">
       <summary>Předchozí konverzace</summary>
       <ul>
         <li v-for="c in conversations" :key="c.id">
@@ -310,13 +310,13 @@ onMounted(async () => {
   font-size: 0.75rem;
 }
 
-.history summary {
+.conversations summary {
   font-size: 0.75rem;
   color: var(--fg-dim);
   cursor: pointer;
 }
 
-.history ul {
+.conversations ul {
   list-style: none;
   margin: 0.3rem 0 0;
   padding: 0;

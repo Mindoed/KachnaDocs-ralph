@@ -99,18 +99,26 @@ const SETTING = /^\s*[-*]\s*([A-Za-z][\w]*)\s*:\s*(.*)$/;
 
 @Injectable()
 export class BehaviorConfigService {
-  /** Where the rules were read from; see `resolveConfigPath`. */
-  readonly path: string;
-
   private readonly logger = new Logger(BehaviorConfigService.name);
   private cached: BehaviorRules | null = null;
   private signature = '';
 
-  constructor() {
+  /**
+   * Where the rules are read from; see `resolveConfigPath`.
+   *
+   * A getter, not a constructor-assigned field, and that is load-bearing rather
+   * than stylistic: "re-read on change" would be a half-truth if the *location*
+   * were pinned at boot while the *contents* were live. The e2e suite repoints
+   * `AI_BEHAVIOR_FILE` at a temp file while the server is running and asserts that
+   * the answer changes; a boot-time path made that test silently exercise the repo
+   * config, and its assertions about the temp file would have been about a file
+   * nobody was reading.
+   */
+  get path(): string {
     // Resolution walks up from the backend workspace to the repo root, the same
     // way env.ts finds .env: the process cwd is the workspace when npm runs a
     // workspace script and the repo root when ts-node is invoked directly.
-    this.path = resolveConfigPath();
+    return resolveConfigPath();
   }
 
   /** Current rules, re-read if the file changed since last time. */
@@ -123,11 +131,18 @@ export class BehaviorConfigService {
     return next;
   }
 
-  /** mtime + size, so a same-second edit with different length still registers. */
+  /**
+   * Path + mtime + size.
+   *
+   * The path is part of the signature because the cache is one slot: repointing
+   * `AI_BEHAVIOR_FILE` at a file with an identical mtime and size would otherwise
+   * be served the previous file's rules.
+   */
   private statSignature(): string {
-    if (!existsSync(this.path)) return 'missing';
-    const stat = statSync(this.path);
-    return `${stat.mtimeMs}:${stat.size}`;
+    const path = this.path;
+    if (!existsSync(path)) return `missing:${path}`;
+    const stat = statSync(path);
+    return `${path}:${stat.mtimeMs}:${stat.size}`;
   }
 
   private parse(): BehaviorRules {

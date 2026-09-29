@@ -103,7 +103,6 @@ export async function scrollToAnchor(anchor: string | null, retries = 200): Prom
     // ends the instant the heading exists, whether that is 20ms or 800ms.
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  trace({ gaveUp: retries });
   return false;
 }
 
