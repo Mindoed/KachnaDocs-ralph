@@ -685,6 +685,59 @@ describe('two connections to one document', () => {
     b.socket.close();
     await Promise.all([a.closed, b.closed]);
   });
+
+  it('gives one shared room to connections that arrive together at a never-opened document', async () => {
+    // The room map is read, awaited over, and written back (`loadRoom`), so two
+    // admissions of a document nobody has opened yet both see no existing room,
+    // both build one, and the second `set` overwrites the first. Each socket is
+    // then attached to a *different* Y.Doc that syncs nothing to the others, the
+    // database stays consistent throughout (the `y_state IS NULL` claim is what
+    // protects the row), and the only symptom is collaborators who cannot see
+    // each other — which in the browser looked like an editor that loaded an
+    // empty document, intermittently, only on a document not yet open.
+    //
+    // `connect` creates its socket synchronously, so firing N of them in one
+    // `Promise.all` is not a race that has to be won on timing: every admission
+    // reaches `loadRoom` with an empty map entry. A document created for this
+    // test, rather than the seeded runbook, is what keeps the entry empty — the
+    // suite's other tests would otherwise have opened it first.
+    const created = await http.post(
+      '/documents',
+      { title: `Současně-${Date.now()}`, groupId: group('engineering') },
+      bona,
+    );
+    const id = (created.body as { id: string }).id;
+    expect((await draftRow(id)).y_state).toBeNull(); // so every admission really is a build
+
+    const tickets = await Promise.all([mintToken(id, bona), mintToken(id, bona), mintToken(id, bona)]);
+    const peers = await Promise.all(tickets.map((ticket) => connect(id, ticket)));
+
+    // Content first: an edit by one must reach both others. Split rooms make this
+    // time out rather than fail fast, which is the honest shape of the bug.
+    await waitFor(() => peers.every((p) => p.frames.length > 0), 'all three sync replies');
+    const marker = `spolu-${Date.now()}`;
+    appendParagraph(peers[0]!.ydoc, marker);
+    for (const [i, peer] of peers.entries()) {
+      if (i === 0) continue;
+      await waitFor(
+        () => peer.ydoc.getXmlFragment(RT_FRAGMENT).toString().includes(marker),
+        `peer ${i} to receive the edit`,
+      );
+    }
+
+    // And the server's own count, from the endpoint the autosave indicator uses.
+    // Two rooms for one document is precisely "peers fewer than connections".
+    // Spelled out rather than passed as an expect() message, which jest has none.
+    const status = await http.get(`/documents/${id}/realtime-status`, bona);
+    const peersSeen = (status.body as { peers: number }).peers;
+    expect({ peersSeen, connections: peers.length }).toEqual({
+      peersSeen: peers.length,
+      connections: peers.length,
+    });
+
+    for (const peer of peers) peer.socket.close();
+    await Promise.all(peers.map((peer) => peer.closed));
+  });
 });
 
 // ---------------------------------------------------------------- presence

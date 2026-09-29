@@ -145,6 +145,11 @@ interface Room {
 export class RealtimeGateway implements OnModuleDestroy {
   private readonly wss = new WebSocketServer({ noServer: true });
   private readonly rooms = new Map<string, Room>();
+  /**
+   * Rooms being built right now, so a second connection to the same document
+   * joins the build instead of racing it — see `loadRoom`.
+   */
+  private readonly loading = new Map<string, Promise<Room | null>>();
   private attached = false;
   private colourCursor = 0;
 
@@ -568,11 +573,38 @@ export class RealtimeGateway implements OnModuleDestroy {
    * already has state would discard live collaboration history and orphan every
    * connected client, so the write stays conditional rather than becoming an
    * upsert, and the loser re-reads and adopts the winner's bytes.
+   *
+   * That guard protects the *row*, and it is not what keeps the two browsers
+   * together. The lookup above and the `rooms.set` below straddle an `await`, so
+   * two admissions of a document nobody has opened yet both see `existing ===
+   * undefined`, each builds its own `Y.Doc` and `Room`, and the later `set`
+   * overwrites the earlier one — leaving each socket attached to a different
+   * in-memory document that syncs nothing and counts one peer. The database
+   * agrees throughout, because of the `y_state` claim, which is the whole reason
+   * this presented as a flaky editor rather than as a corrupt one. `loading`
+   * makes the build single-flight: the second caller awaits the first's promise
+   * and joins the same room. Entry is removed when the promise settles, so a
+   * failed load is retried rather than cached forever.
    */
   private async loadRoom(documentId: string): Promise<Room | null> {
     const existing = this.rooms.get(documentId);
     if (existing) return existing;
+    const inFlight = this.loading.get(documentId);
+    if (inFlight) return inFlight;
 
+    const building = this.buildRoom(documentId);
+    this.loading.set(documentId, building);
+    try {
+      return await building;
+    } finally {
+      // Only the entry this call installed. A later load of the same document
+      // after a `discard` must be allowed to start its own build.
+      if (this.loading.get(documentId) === building) this.loading.delete(documentId);
+    }
+  }
+
+  /** The body of `loadRoom`, split out so `loadRoom` can hand the promise to rivals. */
+  private async buildRoom(documentId: string): Promise<Room | null> {
     const rows = await query<{ id: string; y_state: Buffer | null; draft_body: unknown }>(
       'SELECT id, y_state, draft_body FROM documents WHERE id = $1 LIMIT 1',
       [documentId],

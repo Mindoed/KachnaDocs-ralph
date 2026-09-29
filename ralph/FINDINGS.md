@@ -906,3 +906,62 @@ frontend change here was measured after an explicit `npm run build -w frontend`,
 seeded accounts. Had that been treated as a refutation instead of as "the seed does not contain the shape",
 the report would have been closed as stale — which is exactly the failure mode the previous entry warned
 about, and the reason the repro was built through the API before any assertion was written.
+
+## Flaky realtime suite had a real cause: two admissions could build two rooms for one document
+
+`e2e/realtime.spec.ts` began failing 2–3 of its two-browser tests ("what one writer types
+appears in the other", "simultaneous edits both survive", "presence names the collaborators"),
+on a tree whose Playwright count had been green for iterations. The visible symptom was an
+editor that loaded and reported *Uloženo* while showing nothing, and the server's
+`realtime-status` answering `peers: 1` with **two websockets open and neither closed** — which
+is the sentence that names the bug: the two connections were not in the same room.
+
+**Cause.** `loadRoom` read the map, awaited a query, and wrote the map back:
+`get(documentId)` → `await query(...)` → `set(documentId, room)`. Two admissions of a document
+nobody had opened yet both saw no existing room, each built its own `Y.Doc` and `Room`, and the
+later `set` overwrote the earlier — orphaning the first socket in a document that synced
+nothing. The database stayed correct throughout, because the `WHERE y_state IS NULL` claim
+already guarded *that* race; that is precisely why the failure looked like a flaky UI rather
+than a corrupt one, and why reading the row found nothing wrong.
+
+**Why it appeared only after the AI panel.** `d057da5` set `chat` available, so `AiPanel`
+mounts on every document page and fires `GET /ai/conversations` on mount. That request does not
+touch the gateway; it changes when the two browsers' websocket upgrades are issued relative to
+each other, and the window this bug lives in is "both admissions before either has finished".
+A endpoint measured at 17 ms cold — measured, not assumed — so the panel's *request* was never
+the problem and the panel's *timing* was not a bug in the panel. Proven by control, not
+narrative: with `chat: available: false` the suite was 9/9; with the panel mounted but its
+mount-time fetch commented out, also 9/9; with either reverted, 3 fail. Both `cms.ts` and the
+uncommitted editor work were each separately reverted, rebuilt, and re-run — both stayed red,
+so neither was implicated. **The lesson recorded is about the reasoning, not the panel: a
+change that only moves timing can expose a defect that predates it, and the correct response is
+to fix the defect.**
+
+**The fix is single-flight.** A `loading` map holds the in-flight `buildRoom` promise so a
+rival awaits it and joins the same room; the entry is removed when it settles, so a failed load
+is retried rather than cached, and only the entry the call itself installed is removed, so a
+`discard` followed by a reopen can start its own build.
+
+**The regression test is deterministic, which the browser test could not be.**
+`connections that arrive together at a never-opened document`
+(`backend/test/realtime.e2e-spec.ts`) opens three sockets from one `Promise.all` against a
+document it created for the test. `connect()` creates its socket synchronously, so every
+admission reaches `loadRoom` with an empty map entry — the race is entered by construction, not
+won on timing. It asserts an edit from peer 0 reaches both others and that the server's own
+`peers` count equals the number of connections. Proved red before being believed: with
+`realtime.gateway.ts` reverted to HEAD and nothing else changed, it fails with *"timed out
+waiting for peer 1 to receive the edit"* — the predicted mechanism, not an incidental
+timeout — and it passes with the fix restored.
+
+**Two claims made and then withdrawn, recorded because they were believed for a while.** (1)
+"That flush on release destroys keystrokes from the reconnecting peer" — wrong: `releaseRoom`
+re-checks `room.sockets.size === 0` after its await, which is exactly why a reconnect racing a
+release cannot have its room torn down. (2) "`/ai/conversations` is slow on a cold server" — not
+measured until it was timed, at 17 ms. Both were stated before they were checked, and both were
+wrong.
+
+**Process note on instrumentation.** Adding `console.log` to the gateway made the suite pass
+(two runs, 9/9) — the logging shifted timing enough that the two admissions stopped
+overlapping. That is the classic trap: the instrumented run is not the failing run. The
+deterministic same-tick test is worth more than any log here, and it is also the thing that
+will catch this a second time.
