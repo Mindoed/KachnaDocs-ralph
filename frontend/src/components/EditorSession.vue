@@ -129,6 +129,16 @@ function createEditor(): void {
     }),
     editable: editing.value,
   });
+  // A rebuild is also where a deep link used to die. `destroyEditor` removes the
+  // rendered document, so the browser clamps the scroll to the top and every node
+  // the previous follow had marked is gone — measured, the owner's `permission`
+  // resolving `undefined → WRITE` fires `watch(canEdit, …)` once, right after mount,
+  // and that single rebuild undid the scroll the mount-time follow had just
+  // performed. Re-following here is not the watcher-that-fights-the-reader the
+  // `scrollToAnchor` doc-comment warns about: the rebuild has *already* thrown the
+  // reader to the top of a document they were reading halfway down, so re-applying
+  // the anchor restores the position the rebuild destroyed rather than stealing one.
+  followAnchor();
 }
 
 function destroyEditor(): void {
@@ -282,18 +292,42 @@ onMounted(() => {
   // when already selected, so the ordinary case costs nothing.
   void cms.select(props.documentId);
   createEditor();
-  followAnchor();
   void pollStatus();
   pollTimer = setInterval(() => void pollStatus(), 2000);
-  window.addEventListener('hashchange', followAnchor);
 });
 
 onBeforeUnmount(() => {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
-  window.removeEventListener('hashchange', followAnchor);
   destroyEditor();
 });
+
+/**
+ * Follow the URL's anchor into this document.
+ *
+ * A `hashchange` listener was the first attempt and it missed the case this panel
+ * exists for: `openDocument(..., push)` moves the hash with `history.pushState`,
+ * which does *not* fire `hashchange`. Clicking a citation for a heading in the
+ * document already on screen therefore changed the URL and scrolled nothing. Watching
+ * `route` instead catches every way the URL can move — `pushState`, `popstate` and a
+ * pasted link alike — because `deepLink.ts` re-reads it on all three.
+ *
+ * This is still not the watcher that fights the reader. It keys on the anchor's
+ * *value*, so it runs when an anchor arrives (a chip click, a pasted link) and never
+ * because the reader scrolled away from one that had already been followed.
+ *
+ * `immediate` because of the order a citation click sets up: the URL changes *first*,
+ * and this session is created by that change. A non-immediate watch would see an
+ * anchor that was already correct when it subscribed and never scroll — the exact bug
+ * it replaces, wearing a different hat. With it, the three ways an anchor arrives
+ * (page load, in-app navigation to a closed document, in-app navigation within the
+ * open one) are one code path.
+ */
+watch(
+  () => [route.value.documentId, route.value.anchor] as const,
+  () => followAnchor(),
+  { immediate: true },
+);
 
 watch(canEdit, createEditor);
 </script>

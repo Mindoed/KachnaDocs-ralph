@@ -77,15 +77,25 @@ export function openDocument(documentId: string | null, anchor?: string | null, 
  * the reader: any scroll they did afterwards would snap them back the next time
  * something re-ran the watch. So the panel calls this when a link *arrives* (on
  * load, or on a hashchange from a pasted link), and clears nothing else.
+ *
+ * The retry budget is sized to a websocket sync, not to a paint. Polling a frame at
+ * a time is still the right mechanism — the loop ends the instant the heading
+ * exists — but the heading is a node inside a Y.Doc that has to arrive over the
+ * network first, and a citation clicked in the chat panel opens a *brand-new*
+ * session: connect, subscribe, receive the document, render. Measured, that exceeded
+ * the original 20×50 ms and the scroll silently gave up, leaving a deep link that
+ * opened the right document at the top. The budget is therefore 10 s of patience with
+ * an immediate exit, which costs nothing when the anchor is already on screen — and
+ * when it is *not* found within it, `false` is returned rather than a second
+ * mechanism invented to paper over the miss.
  */
-export async function scrollToAnchor(anchor: string | null, retries = 20): Promise<boolean> {
+export async function scrollToAnchor(anchor: string | null, retries = 200): Promise<boolean> {
   if (!anchor) return false;
   for (let i = 0; i < retries; i += 1) {
     const el =
       document.getElementById(anchor) ?? document.querySelector(`[data-anchor="${cssEscape(anchor)}"]`);
     if (el) {
       el.scrollIntoView({ block: 'center' });
-      el.setAttribute('data-target', 'true');
       return true;
     }
     // The editor renders after the first sync round trip, and a deep link arrives
@@ -93,6 +103,7 @@ export async function scrollToAnchor(anchor: string | null, retries = 20): Promi
     // ends the instant the heading exists, whether that is 20ms or 800ms.
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+  trace({ gaveUp: retries });
   return false;
 }
 

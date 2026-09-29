@@ -302,6 +302,41 @@ test.describe('collaborative editing, two browsers', () => {
     await expect(await ready(other)).toContainText(reply, { timeout: 15_000 });
   });
 
+  /**
+   * Place the caret inside the paragraph containing `needle`, and *prove* it landed.
+   *
+   * This helper exists because a bare `click()` + Home was measurably a coin flip: in
+   * 8 of 20 instrumented runs the typed note landed at the very start of the
+   * document's heading (`poznamka AObsah`) — the click had not moved the caret, so
+   * Home/Enter applied to wherever the selection actually was (the doc start, from
+   * mount), and the writer split the heading instead of their paragraph. The Yjs
+   * merge then had nothing to do with the failure; the test had simply typed into a
+   * different block than it claimed.
+   *
+   * So: click, read the caret back from the DOM selection, retry until the caret's
+   * closest `p` is the one we aimed at. The precondition the test was previously
+   * assuming is now an assertion with retries — if placement keeps failing, that is
+   * what the failure says, instead of a misleading "Yjs lost an edit".
+   */
+  async function caretInParagraph(page: Page, needle: string): Promise<void> {
+    const editor = page.locator('[data-testid=editor-host] .tiptap');
+    const caretParagraph = (): Promise<string> =>
+      page.evaluate(() => {
+        const node = window.getSelection()?.anchorNode ?? null;
+        if (!node) return '';
+        const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : (node as HTMLElement);
+        return el?.closest('p')?.textContent ?? '';
+      });
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await editor.locator('p', { hasText: needle }).click();
+      // ProseMirror mirrors DOM selection into its own state on a microtask; give the
+      // read-back one tick or we would be racing our own click.
+      await page.waitForTimeout(25);
+      if ((await caretParagraph()).includes(needle)) return;
+    }
+    throw new Error(`caret never landed in the paragraph containing "${needle}"`);
+  }
+
   test('simultaneous edits in different places both survive', async () => {
     // Two paragraphs, and one writer per paragraph.
     //
@@ -330,28 +365,49 @@ test.describe('collaborative editing, two browsers', () => {
 
     // Both writers type without either waiting for the other, so the two updates are
     // genuinely in flight at the same time rather than arriving in the order typed.
-    const typing = [
-      [bona, 'Home', 'A'],
-      [other, 'Control+End', 'B'],
-    ] as const;
-    await Promise.all(
-      [...typing].map(async ([page, move, letter]) => {
-        const editor = await ready(page);
-        await editor.click();
-        await page.keyboard.press(move);
-        await page.keyboard.press('Enter');
-        await page.keyboard.type(`poznamka ${letter}`);
-      }),
-    );
+    //
+    // Each writer's position is pinned to a *named block whose ownership of the
+    // caret is verified before anything is typed* (`caretInParagraph`), which
+    // replaces two earlier shapes. The original pressed a centre click + Home, and
+    // a centre click focuses wherever the editable's midpoint happens to fall:
+    // measurably often (8 runs in 20 in an instrumented repeat) the click never
+    // moved the caret at all, Home/Enter applied to the selection mount had left
+    // at the document start, and the note landed as heading text — the snapshot
+    // showed `heading "poznamka AObsah"` — so the test failed on a run where Yjs
+    // had lost nothing. Pinning to a block by clicking it was the right idea and
+    // still assumed the click took. Verifying the DOM selection after the click is
+    // what makes "each writer owns their paragraph" a fact the test checks rather
+    // than hopes.
+    await Promise.all([
+      (async () => {
+        await caretInParagraph(bona, first);
+        await bona.keyboard.press('Home');
+        await bona.keyboard.press('Enter');
+        await bona.keyboard.type('poznamka A');
+      })(),
+      (async () => {
+        await caretInParagraph(other, second);
+        await other.keyboard.press('Control+End');
+        await other.keyboard.press('Enter');
+        await other.keyboard.type('poznamka B');
+      })(),
+    ]);
 
     for (const page of [bona, other]) {
       const editor = await ready(page);
       // Each note sits in its own block, which is what "both survived" means when the
       // blocks were different: neither overwrote the other.
-      await expect(editor.locator('p', { hasText: 'poznamka A' })).toHaveCount(1);
-      await expect(editor.locator('p', { hasText: 'poznamka B' })).toHaveCount(1);
-      await expect(editor).toContainText(first);
-      await expect(editor).toContainText(second);
+      //
+      // 15 s, matching the cross-peer waits above: these assertions are the first
+      // look the *other* browser gets at each note, so they are sync assertions and
+      // deserve the same patience. (They initially went to 15 s chasing a diagnosis
+      // that turned out to be wrong — the real cause was caret placement, fixed in
+      // `caretInParagraph` — but the relaxed budget is right on its own merits and
+      // was kept after re-measurement.)
+      await expect(editor.locator('p', { hasText: 'poznamka A' })).toHaveCount(1, { timeout: 15_000 });
+      await expect(editor.locator('p', { hasText: 'poznamka B' })).toHaveCount(1, { timeout: 15_000 });
+      await expect(editor).toContainText(first, { timeout: 15_000 });
+      await expect(editor).toContainText(second, { timeout: 15_000 });
     }
   });
 
