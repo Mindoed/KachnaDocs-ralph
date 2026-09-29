@@ -5,6 +5,7 @@ import CmsTreePanel from './CmsTreePanel.vue';
 import PermissionsPanel from './PermissionsPanel.vue';
 import VersionHistoryPanel from './VersionHistoryPanel.vue';
 import EditorPanel from './EditorPanel.vue';
+import AiPanel from './AiPanel.vue';
 
 const props = defineProps<{ view: ViewDescriptor }>();
 
@@ -17,6 +18,7 @@ const PANELS: Record<string, Component> = {
   versions: VersionHistoryPanel,
   permissions: PermissionsPanel,
   editor: EditorPanel,
+  chat: AiPanel,
 };
 
 const panel = computed(() => PANELS[props.view.id] ?? null);

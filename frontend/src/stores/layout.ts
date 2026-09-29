@@ -49,7 +49,7 @@ export const VIEWS: ViewDescriptor[] = [
   { id: 'editor', title: 'Editor', icon: '✎', preferredDock: 'main', available: true },
   { id: 'permissions', title: 'Oprávnění', icon: '🔐', preferredDock: 'right', available: true },
   { id: 'tasks', title: 'Úkoly', icon: '☑', preferredDock: 'right', available: false },
-  { id: 'chat', title: 'AI chat', icon: '✦', preferredDock: 'right', available: false },
+  { id: 'chat', title: 'AI chat', icon: '✦', preferredDock: 'right', available: true },
 ];
 
 const STORAGE_KEY = 'kachnadocs.layout.v1';
