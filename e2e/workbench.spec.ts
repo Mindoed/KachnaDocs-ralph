@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 
 /**
  * Scope: what only a real browser against the real API can prove — that the
@@ -17,6 +17,30 @@ async function login(page: Page, handle: string): Promise<void> {
   await page.fill('input[autocomplete="username"]', handle);
   await page.getByRole('button', { name: /Přihlásit se/ }).click();
   await expect(page.locator('footer.status')).toBeVisible();
+}
+
+/**
+ * API calls for the *setup* of a browser test — arranging a state the UI cannot
+ * itself reach in one session. Kept separate from `login()` on purpose: what a
+ * test asserts stays in the browser, and only the fixture is HTTP.
+ */
+async function apiToken(request: APIRequestContext, handle: string): Promise<string> {
+  const res = await request.post('/api/auth/dev-login', { data: { handle } });
+  expect(res.ok(), `dev-login as ${handle}`).toBeTruthy();
+  return ((await res.json()) as { token: string }).token;
+}
+
+async function apiJson(
+  request: APIRequestContext,
+  path: string,
+  token: string,
+  data?: unknown,
+): Promise<unknown> {
+  const headers = { authorization: `Bearer ${token}` };
+  const res =
+    data === undefined ? await request.get(path, { headers }) : await request.post(path, { data, headers });
+  expect(res.ok(), `${data === undefined ? 'GET' : 'POST'} ${path}`).toBeTruthy();
+  return res.json();
 }
 
 test('a signed-in session survives a reload', async ({ page }) => {
@@ -259,6 +283,167 @@ test('the tree shows all three levels and honors a deny override', async ({ page
   // than only at the API — the backend guard is `counts agree with the ACL`.
   const payroll = tree.locator('.row.group', { hasText: 'Payroll' });
   await expect(payroll.locator('.count')).toHaveText('0');
+});
+
+test('a categorised document reaches the tree of a reader who cannot see its group', async ({
+  page,
+  request,
+}) => {
+  // The bug the user reported: the row is in the database, `GET /documents`
+  // returns it, and the tree does not list it.
+  //
+  // Reproduced through the API only — no SQL — because every step is ordinary
+  // use. Bona MANAGEs Engineering, so she may create a category there, put a
+  // document in it, and grant Carl READ on that one document. A direct document
+  // grant does not make the *group* readable, so Carl's `GET /groups` comes back
+  // empty and his two documents land in cms.ts's fallback pass for "groups the
+  // caller cannot see" (stores/cms.ts, the `byGroup` loop). That pass exists for
+  // exactly this reader — its comment says rendering only what /groups returned
+  // "would hide a document the API just said they may read" — but it emits with
+  // `categoryId === null`, so the runbook it was written for appears and the
+  // categorised one does not.
+  //
+  // The assertion is the user-visible property, not the store's internals: a row
+  // in the tree carrying the document's title.
+  const asBona = await apiToken(request, 'bona');
+  const groups = await apiJson(request, '/api/groups', asBona);
+  const engineering = (groups as { id: string; name: string }[]).find((g) => g.name === 'Engineering');
+  expect(engineering, 'seed must leave Bona a group she manages').toBeTruthy();
+
+  // Named per run: the suite shares one seeded database across files, and a fixed
+  // title would let a leftover from an aborted run satisfy this test's own
+  // assertion. Cleanup runs regardless, but a marker keeps a leak loud.
+  const marker = `kategorie-${Math.random().toString(36).slice(2, 8)}`;
+  const title = `Prirucka ${marker}`;
+
+  const category = await apiJson(request, '/api/categories', asBona, {
+    name: `Sada ${marker}`,
+    groupId: engineering!.id,
+  });
+  const document = await apiJson(request, '/api/documents', asBona, {
+    title,
+    groupId: engineering!.id,
+    categoryId: (category as { id: string }).id,
+  });
+  const documentId = (document as { id: string }).id;
+
+  const subjects = await apiJson(request, `/api/permissions/subjects?q=Carl`, asBona);
+  const carl = (subjects as { subjects: { id: string; name: string }[] }).subjects.find((s) =>
+    s.name.includes('Carl'),
+  );
+  expect(carl, 'seed must leave a Carl to grant').toBeTruthy();
+
+  const grant = (await apiJson(request, '/api/permissions', asBona, {
+    subjectKind: 'user',
+    subjectId: carl!.id,
+    targetKind: 'document',
+    targetId: documentId,
+    permission: 'READ',
+  })) as { id: string };
+
+  try {
+    // Both halves, in this order, so a failure says which side moved.
+    const asCarl = await apiToken(request, 'carl');
+    const carlDocs = (await apiJson(request, '/api/documents', asCarl)) as { id: string; title: string }[];
+    expect(
+      carlDocs.map((d) => d.id),
+      'the API must return the document before the tree can be blamed for it',
+    ).toContain(documentId);
+    const carlGroups = (await apiJson(request, '/api/groups', asCarl)) as unknown[];
+    expect(
+      carlGroups.length,
+      'a document grant must not reveal the group — that is the shape of the bug',
+    ).toBe(0);
+
+    await login(page, 'carl');
+    const tree = page.locator('.tree[role="tree"]');
+    await expect(tree).toBeVisible();
+    // The seeded runbook proves the fallback pass itself works, so a failure here
+    // is the category and not the whole path being broken.
+    await expect(tree.locator('.row.document', { hasText: 'Nasazovací runbook' })).toBeVisible();
+    await expect(tree.locator('.row.document', { hasText: title })).toBeVisible();
+  } finally {
+    // Left to the next `serve-e2e.mjs` seed would be enough for CI, but the suite
+    // seeds once per run and `workers: 1`, so a leftover here would show up as a
+    // phantom third document row in Carl's tests further down the file.
+    await request.delete(`/api/permissions/${grant.id}`, { headers: { authorization: `Bearer ${asBona}` } });
+    await request.delete(`/api/documents/${documentId}`, { headers: { authorization: `Bearer ${asBona}` } });
+    await request.delete(`/api/categories/${(category as { id: string }).id}`, {
+      headers: { authorization: `Bearer ${asBona}` },
+    });
+  }
+});
+
+test('a document stays in the tree when its category is moved to another group', async ({
+  page,
+  request,
+}) => {
+  // The same defect one level up, found while fixing the one above.
+  //
+  // `POST /documents` refuses a document whose category belongs to a different
+  // group, but `PATCH /categories/:id` moves a category between groups and leaves
+  // `documents.group_id` where it was — verified through the API: after the move
+  // the document still reports groupId=Engineering while its category lives in
+  // the group it was carried off to. The old tree walked categories by
+  // `cat.groupId === group.id` and then emitted the group's uncategorised
+  // documents, so a row matching neither disappeared — from the tree of a caller
+  // who can see *both* groups and holds WRITE on both. That is the worse version
+  // of the bug: not a restricted reader, a fully-privileged one.
+  //
+  // Asserted for Bona, the mover herself, rather than for a restricted reader.
+  const asBona = await apiToken(request, 'bona');
+  const groups = (await apiJson(request, '/api/groups', asBona)) as { id: string; name: string }[];
+  const engineering = groups.find((g) => g.name === 'Engineering');
+  expect(engineering, 'seed must leave Bona a group she manages').toBeTruthy();
+
+  const marker = `presun-${Math.random().toString(36).slice(2, 8)}`;
+  const title = `Zastrcena ${marker}`;
+
+  const category = (await apiJson(request, '/api/categories', asBona, {
+    name: `Puvodni ${marker}`,
+    groupId: engineering!.id,
+  })) as { id: string };
+  // A second group to move into: Bona MANAGEs Engineering and creating a group
+  // hands its creator a MANAGE grant, so she can move between the pair.
+  const newGroup = (await apiJson(request, '/api/groups', asBona, {
+    name: `Cilova ${marker}`,
+    parentId: null,
+  })) as { id: string };
+  const document = (await apiJson(request, '/api/documents', asBona, {
+    title,
+    groupId: engineering!.id,
+    categoryId: category.id,
+  })) as { id: string };
+
+  try {
+    const moved = await request.patch(`/api/categories/${category.id}`, {
+      headers: { authorization: `Bearer ${asBona}` },
+      data: { groupId: newGroup.id },
+    });
+    expect(
+      moved.ok(),
+      'PATCH /categories must allow the move — that is what strands the document',
+    ).toBeTruthy();
+
+    // The precondition, stated rather than assumed: the row really is
+    // stranded in the database, category in one group and document in another.
+    const reread = (await apiJson(request, `/api/documents/${document.id}`, asBona)) as {
+      groupId: string;
+      categoryId: string | null;
+    };
+    expect(reread.categoryId, 'the document must keep its category').toBe(category.id);
+    expect(reread.groupId, 'the move must not have taken the document with it').toBe(engineering!.id);
+
+    await login(page, 'bona');
+    const tree = page.locator('.tree[role="tree"]');
+    await expect(tree).toBeVisible();
+    await expect(tree.locator('.row.document', { hasText: title })).toBeVisible();
+  } finally {
+    const headers = { authorization: `Bearer ${asBona}` };
+    await request.delete(`/api/documents/${document.id}`, { headers });
+    await request.delete(`/api/categories/${category.id}`, { headers });
+    await request.delete(`/api/groups/${newGroup.id}`, { headers });
+  }
 });
 
 test('NONE is reachable in the grant editor and renders as a denial', async ({ page }) => {

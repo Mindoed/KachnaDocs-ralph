@@ -826,3 +826,83 @@ re-resolved (`cms-crud.e2e-spec.ts:354`, plus `:307` where moving a document *ou
 `backend/test/ai.e2e-spec.ts` and the lazy-`path` change to `behavior-config.service.ts`. Neither is
 verified; the green above says nothing about either. `ralph/prompts/phase5-ai.md` remains unfinished —
 its six required tests are exactly what that stashed file attempts, unrun.
+
+## Bug reported by the user: a document present in the database does not appear in the CMS tree
+
+Reported on d057da5, with an uncommitted tree (behavior-config.service.ts, AiPanel.vue, deepLink.ts, and
+the untracked backend/test/ai.e2e-spec.ts). Symptom as stated: the row is in the database and the tree
+does not list it. **Repro not yet pinned** — unknown which account, which document, or how that document
+came to exist (seeded / `POST /documents` / shared in by another user). Until that is known this is an
+unconfirmed observation, not a covered case, and it should be re-checked rather than assumed fixed.
+
+**Why a green gate does not refute this, and why it must not be closed on that basis:**
+`e2e/workbench.spec.ts:163` asserts `.row.document` `toHaveCount(2)` for `bona`, and `verify` runs
+Playwright (package.json:27), so a bare "documents are not showing" is contradicted by the next green
+run and would correctly read as stale. But :163 covers only **seeded** fixtures on **bona's** login. The
+gap this bug would live in is one of: (a) a document created at runtime rather than by the seed, (b) an
+account other than the seeded ones, (c) a document shared in from another user, or (d) the tree
+rendering while the document *body* stays blank. Which one decides whether the assertion belongs in jest
+or Playwright.
+
+**No failing test exists for this yet** — that is the outstanding work, and the reason this entry may be
+re-derived rather than acted on. PLAN §6 ranks "a red gate outranks new features", so the report becomes
+load-bearing only once an assertion goes red at the level where it breaks (the tree listing the
+document, not the API returning a row). Do not weaken such an assertion to get green.
+
+Narrowing, unverified: "in the DB, absent from the UI" also matches a fail-closed filter dropping every
+row rather than a renderer bug. Check whether the API returns the row *before* assuming the tree is at
+fault — API empty is server-side and jest can pin it; API returning the row while the UI does not is
+client-side and belongs in Playwright. Precedent for how this kind of miss survives iterations: phase 2
+found "a fully green suite proved a broken ACL" because the assertion sat at the wrong level.
+
+## Resolved: the reported tree bug is real, pinned, and fixed — the fallback pass dropped categorised documents
+
+The entry above was written without a repro. There is one now, and it is the report as stated: the row is
+in the database, `GET /documents` returns it, and the tree lists no row for it. Reached through the API
+only — no SQL — which is what makes it ordinary use rather than a corrupted fixture.
+
+**The defect.** `frontend/src/stores/cms.ts` ends `tree` with a pass for documents whose *group* the caller
+cannot see, and that pass existed for exactly this reader — its own comment: rendering only what
+`/groups` returned "would hide a document the API just said they may read". But it called
+`emitDocuments(groupId, null, 1)`, i.e. **uncategorised documents only**. A direct document grant does not
+make the group readable (`can_access_document` does not walk up to the group), so the recipient's
+`GET /groups` is empty, both of their documents land in that pass, and only the uncategorised one appears.
+
+**Repro, end to end.** Bona MANAGEs Engineering → `POST /categories` (needs WRITE) → `POST /documents` with
+that `categoryId` → `POST /permissions` granting Carl READ on that one document (needs MANAGE on the
+document, which her group MANAGE gives her). Carl then holds: `/documents` = 2 rows, `/groups` = 0 rows,
+tree = 1 row. The seeded runbook *did* appear — which is why this survived every previous iteration: the
+pass demonstrably works, so reading it as "handles Carl" looked correct, and `workbench.spec.ts` only ever
+asserted on seeded, uncategorised fixtures (`:163` for bona, `:218` for carl with exactly one document).
+Gap (a) and (c) from the entry above, at once: created at runtime, shared in by another user.
+
+**A second, worse instance of the same mistake, found while fixing the first.** `POST /documents` rejects a
+document whose category belongs to a different group, but `PATCH /categories/:id` moves a category between
+groups and leaves `documents.group_id` behind — confirmed through the API: after the move the document
+still reports `groupId=Engineering` while its category lives in the group it was carried off to. Such a row
+matches neither `emitDocuments(group.id, c.id)` nor `emitDocuments(group.id, null)`, so it vanished **from
+the tree of a caller who can see and write both groups** — a fully-privileged reader, not a restricted one.
+
+**The fix is stated over documents, not over a combination of group and category.** The tail of `tree` now
+sweeps `documents.value` for anything not yet placed and gives each a row, under a group/category header
+synthesised from the `groupName` / `categoryName` every document row already carries (no extra request).
+The invariant is written above the function: *every document `GET /documents` returned has a row here* —
+the API has already decided READ in SQL (PLAN §3.1), so a dropped row is not a filter but a lost document,
+and PLAN §3.5 forbids this file making hiding decisions. Both known shapes are then covered by
+construction, along with the next one nobody has thought of. The category header is re-emitted under a
+second key when it already appears elsewhere, because shape 2 puts a category and its documents in two
+places at once and a document indented with no header above it reads as a glitch, not as a stranded row.
+
+**Both tests were proved red before being believed.** `e2e/workbench.spec.ts` gains two tests; with
+`cms.ts` reverted to HEAD and `frontend/dist` rebuilt, both fail (`element(s) not found`). With the fix,
+`workbench.spec.ts` is 15/15, including the pre-existing row counts — each test deletes what it created, so
+the seeded counts the older tests assert are untouched. Placed in Playwright because the narrowing in the
+entry above was right: the API returned the row, so the break was client-side.
+
+**Two process notes worth keeping.** (1) The probe was run against `scripts/serve-e2e.mjs` on port 3100,
+and that script only checks that `frontend/dist/index.html` *exists* — it never rebuilds it. Every
+frontend change here was measured after an explicit `npm run build -w frontend`, which is the only way a
+`cms.ts` change is visible to Playwright at all. (2) The diff script first reported `DROPPED=0` for all four
+seeded accounts. Had that been treated as a refutation instead of as "the seed does not contain the shape",
+the report would have been closed as stale — which is exactly the failure mode the previous entry warned
+about, and the reason the repro was built through the API before any assertion was written.

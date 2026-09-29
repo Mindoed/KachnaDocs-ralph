@@ -178,20 +178,47 @@ export const useCmsStore = defineStore('cms', () => {
    * itself visible. A caller with READ on Payroll but not on HR still gets
    * Payroll at the top level — dropping it would hide documents they are
    * allowed to read, which is the opposite of what a tree filter should do.
+   *
+   * The invariant the whole function exists to keep is at the bottom: **every
+   * document `GET /documents` returned has a row here.** The API has already
+   * decided the caller may read it (PLAN §3.1 filters in SQL), so a tree that
+   * silently drops it is not a security filter but a lost document — the bug
+   * this file was wrong about, see the sweep below.
    */
   const tree = computed<TreeNode[]>(() => {
     const out: TreeNode[] = [];
     const known = new Set(groups.value.map((g) => g.id));
+    // Which headers and rows have already been emitted, so the sweep at the end
+    // can fill a gap without duplicating a node. Vue keys rows by `key`, so a
+    // repeated one is a mis-render rather than an error — hence the bookkeeping.
+    const placedKeys = new Set<string>();
+    const placedDocs = new Set<string>();
+    const groupDepth = new Map<string, number>();
+
+    const push = (node: TreeNode): void => {
+      if (node.kind === 'document') placedDocs.add(node.id);
+      else placedKeys.add(node.key);
+      if (node.kind === 'group') groupDepth.set(node.id, node.depth);
+      out.push(node);
+    };
+
+    const sortDocs = (docs: DocumentDto[]): DocumentDto[] =>
+      [...docs].sort((a, b) => a.position - b.position || a.title.localeCompare(b.title, 'cs'));
 
     const documentsIn = (groupId: string, categoryId: string | null): DocumentDto[] =>
-      documents.value
-        .filter((d) => d.groupId === groupId && d.categoryId === categoryId)
-        .sort((a, b) => a.position - b.position || a.title.localeCompare(b.title, 'cs'));
+      sortDocs(documents.value.filter((d) => d.groupId === groupId && d.categoryId === categoryId));
+
+    const documentNode = (d: DocumentDto, depth: number): TreeNode => ({
+      key: `d-${d.id}`,
+      kind: 'document',
+      id: d.id,
+      label: d.title,
+      depth,
+      document: d,
+    });
 
     const emitDocuments = (groupId: string, categoryId: string | null, depth: number): void => {
-      for (const d of documentsIn(groupId, categoryId)) {
-        out.push({ key: `d-${d.id}`, kind: 'document', id: d.id, label: d.title, depth, document: d });
-      }
+      for (const d of documentsIn(groupId, categoryId)) push(documentNode(d, depth));
     };
 
     const walked = new Set<string>();
@@ -200,7 +227,7 @@ export const useCmsStore = defineStore('cms', () => {
       // emitted twice, and a cycle must not recurse forever.
       if (walked.has(group.id)) return;
       walked.add(group.id);
-      out.push({
+      push({
         key: `g-${group.id}`,
         kind: 'group',
         id: group.id,
@@ -211,7 +238,7 @@ export const useCmsStore = defineStore('cms', () => {
       for (const c of categories.value
         .filter((cat) => cat.groupId === group.id)
         .sort((a, b) => a.position - b.position)) {
-        out.push({
+        push({
           key: `c-${c.id}`,
           kind: 'category',
           id: c.id,
@@ -239,26 +266,95 @@ export const useCmsStore = defineStore('cms', () => {
     // rather than silently dropped along with its documents.
     for (const leftover of groups.value.filter((g) => !walked.has(g.id))) walk(leftover, 0);
 
-    // Documents whose *group* the caller cannot see. This is the ordinary case
-    // for a direct document grant: `GET /groups` resolves group grants, so
-    // someone granted READ on one document (Carl in the seed fixture) receives
-    // that document and no groups at all. Rendering only what /groups returned
-    // would hide a document the API just said they may read, so each such group
-    // gets a header from the name the document itself carries.
-    const byGroup = new Map<string, string>();
-    for (const d of documents.value) {
-      if (!walked.has(d.groupId)) byGroup.set(d.groupId, d.groupName);
+    // The sweep that keeps the invariant: anything still unplaced gets a row,
+    // under a header synthesised from the names the document itself carries
+    // (`groupName`, `categoryName` — both on every row, so no extra request).
+    //
+    // Two distinct shapes land here, and `walk` cannot reach either:
+    //
+    //  1. The caller's *group* is invisible. This is the ordinary case for a
+    //     direct document grant: `GET /groups` resolves group grants, so someone
+    //     granted READ on one document (Carl in the seed) gets that document and
+    //     no groups at all.
+    //  2. `documents.category_id` points at a category belonging to a *different*
+    //     group than `documents.group_id`. `POST /documents` rejects that
+    //     mismatch, but `PATCH /categories/:id` moves a category between groups
+    //     and leaves the documents' `group_id` behind, so the row matches neither
+    //     `emitDocuments(group.id, c.id)` — the category was filed elsewhere —
+    //     nor `emitDocuments(group.id, null)`.
+    //
+    // Shape 1 is why this pass exists at all; it used to emit only
+    // `categoryId === null`, which is what hid the reported document. Shape 2 is
+    // the same mistake one level up, so the guarantee is stated over *documents*
+    // rather than over any one combination of group and category — the next shape
+    // nobody has thought of is covered by construction.
+    const strays = documents.value.filter((d) => !placedDocs.has(d.id));
+    const strayGroups = new Map<string, { name: string; docs: DocumentDto[] }>();
+    for (const d of strays) {
+      const entry = strayGroups.get(d.groupId) ?? { name: d.groupName, docs: [] };
+      entry.docs.push(d);
+      strayGroups.set(d.groupId, entry);
     }
-    for (const [groupId, name] of [...byGroup.entries()].sort((a, b) => a[1].localeCompare(b[1], 'cs'))) {
-      out.push({
-        key: `g-${groupId}`,
-        kind: 'group',
-        id: groupId,
-        label: name,
-        depth: 0,
-        documentCount: undefined,
-      });
-      emitDocuments(groupId, null, 1);
+
+    for (const [groupId, { name, docs }] of [...strayGroups.entries()].sort((a, b) =>
+      a[1].name.localeCompare(b[1].name, 'cs'),
+    )) {
+      // Under a visible group the header `walk` drew is the right home; only a
+      // group that was never listed gets one.
+      let depth = groupDepth.get(groupId);
+      if (depth === undefined) {
+        depth = 0;
+        push({
+          key: `g-${groupId}`,
+          kind: 'group',
+          id: groupId,
+          label: name,
+          depth,
+          documentCount: undefined,
+        });
+      }
+
+      // Categorised strays first, then the unfiled ones, matching `walk`'s order.
+      // Ordered by category name, because `position` lives on the category rows
+      // this caller was never sent.
+      const categorised = new Map<string, { name: string; docs: DocumentDto[] }>();
+      const unfiled: DocumentDto[] = [];
+      for (const d of docs) {
+        if (!d.categoryId) {
+          unfiled.push(d);
+          continue;
+        }
+        // `categoryName` is null only when the category row is gone, which the
+        // ON DELETE SET NULL constraint rules out; the title keeps such a row
+        // visible instead of dropping it, which is the whole point here.
+        const label = d.categoryName ?? '(kategorie)';
+        const entry = categorised.get(d.categoryId) ?? { name: label, docs: [] };
+        entry.docs.push(d);
+        categorised.set(d.categoryId, entry);
+      }
+
+      for (const [categoryId, { name: categoryName, docs: catDocs }] of [...categorised.entries()].sort(
+        (a, b) => a[1].name.localeCompare(b[1].name, 'cs'),
+      )) {
+        // The header is repeated under this group even when `walk` already drew
+        // it elsewhere, because shape 2 puts the category and its documents in
+        // two different places at once and a document indented one level with no
+        // header above it reads as a rendering glitch. Rows are keyed, so the
+        // second copy needs a key of its own.
+        const key = placedKeys.has(`c-${categoryId}`) ? `c-${categoryId}-in-${groupId}` : `c-${categoryId}`;
+        if (!placedKeys.has(key)) {
+          push({
+            key,
+            kind: 'category',
+            id: categoryId,
+            label: categoryName,
+            depth: depth + 1,
+            documentCount: undefined,
+          });
+        }
+        for (const d of sortDocs(catDocs)) push(documentNode(d, depth + 2));
+      }
+      for (const d of sortDocs(unfiled)) push(documentNode(d, depth + 1));
     }
     return out;
   });
