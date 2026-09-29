@@ -74,3 +74,38 @@ Format: `phase — SPEC.md bullet — reason`
   and delete _documents_, which the tree does. Groups and categories are managed through the API
   (`/groups`, `/categories`, covered by `cms-crud.e2e-spec.ts`) and the seed fixture. A tree read-only above
   the document level is a real limitation of this phase's UI, recorded rather than left implied.
+
+---
+
+## Phase 5 (RAG + AI asistent)
+
+- **5 — SPEC §5 "chování konfigurovatelné v Markdown souboru": prose rules are parsed, not obeyed** —
+  `behavior-config.service.ts` splits the file into `key: value` settings and prose. The settings are
+  executed by the pipeline today (retrieval threshold, citation count, non-answer wording, answer prefix),
+  which is what makes "editing the config changed the behaviour" a test that passes today. The prose is
+  concatenated and handed to `GenerationInput.behaviorRules`, where **a real model would consume it as a
+  system prompt** — `StubProvider` quotes retrieved chunk text verbatim and cannot follow an instruction,
+  by design (see the header comment in `generation.provider.ts`: it does not write prose, does not invent
+  an answer, and does not decide what may be retrieved). So a rule like "Odpovídej střídmě" is
+  round-tripped and ignored until a model is bound. Deliberate rather than missing: pretending to obey
+  prose would make the config file's effect a matter of opinion, and the phase's testable claim is about
+  the settings half. `AI_BEHAVIOR_FILE` is re-read on change (stat signature includes the path), so the
+  moment a model lands the prose is already delivered to it.
+- **5 — no fulltext search endpoint exists, so SPEC.md:90's "…přes API, vyhledávání, WebSocket ani AI
+  chatbot" is asserted on three of four surfaces** — verified by grep: no `to_tsquery`/`tsvector` anywhere
+  in `backend/migrations` or `backend/src`. SPEC.md:4 lists "fulltextové vyhledávání" as a product feature
+  and PLAN.md §3.1 names "fulltext search" as one of the four read paths that must filter in SQL, but
+  **no `ralph/prompts/*.md` assigns it to any phase** — the bullet is carried by phase 1's deferral of the
+  same sentence and has not since been picked up. `ai_search_chunks`
+  (migration 1740000009000) is vector retrieval, not fulltext, and is asserted per-candidate through
+  `can_access_document`. This is the one item here that is a gap between documents rather than a phase's
+  scope choice, and it should be scheduled explicitly rather than inherited again.
+- **5 — a malformed conversation id answers 500, not the 404 PLAN §3.3 requires** —
+  `GET /ai/conversations/:id` with a non-UUID path parameter raises a database error rather than the
+  "does not exist" answer a valid-but-someone-else's id gets. PLAN §3.3 wants denial and absence
+  indistinguishable, and a 500 is distinguishable, though it discloses nothing (no row data, and the
+  status is not conditioned on any grant). Left unfixed and **not asserted into permanence**: the honest
+  fix is input validation returning 400 before the query, which is a product decision about the error
+  contract rather than an ACL change, and writing the current behaviour as a test would be asserting the
+  defect. `backend/test/ai.e2e-spec.ts` therefore uses `GHOST_ID` — a valid UUID that really does get the
+  404 — for the indistinguishability claim.
