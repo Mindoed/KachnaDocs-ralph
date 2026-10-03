@@ -26,3 +26,4 @@ jobs:
         with:
           context: .
           push: true
+          tags: ghcr.io/mindoed/kachnadocs-ralph:latest
